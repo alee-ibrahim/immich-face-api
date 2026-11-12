@@ -71,7 +71,7 @@ class Store:
         self._cache: dict[str, tuple[float, StoreKey | None]] = {}
         self._cache_ttl = key_cache_seconds
         self._used: set[str] = set()
-        self._last_purge = 0.0
+        self._last_purge: float | None = None
         self._migrated = False
 
     # ---------------------------------------------------------------- lifecycle
@@ -199,7 +199,7 @@ class Store:
             raise
 
     async def purge(self, retention_days: int) -> None:
-        if time.monotonic() - self._last_purge < 6 * 3600:
+        if self._last_purge is not None and time.monotonic() - self._last_purge < 6 * 3600:
             return
         async with self.pool.connection() as conn:
             await conn.execute(
