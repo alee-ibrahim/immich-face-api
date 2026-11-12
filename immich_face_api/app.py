@@ -143,7 +143,8 @@ class State:
             if not await self.ml.ping():
                 raise RuntimeError("machine-learning server not reachable")
             if self.store and not await self.store.ping():
-                raise RuntimeError("store database not reachable")
+                # not a readiness failure: env keys keep working and usage stays buffered in memory
+                log.warning("store database not reachable (UI-made keys cannot be checked)")
         except SchemaMismatch as exc:
             self._set(False, str(exc), error=True)
         except Exception as exc:  # noqa: BLE001
@@ -267,7 +268,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await state.db.open()
         tasks = [asyncio.create_task(state.readiness_loop())]
         if state.store:
-            await state.store.open(migrate=True)
+            await state.store.open(migrate=True, wait=False)
             tasks.append(asyncio.create_task(state.store.flush_loop(settings.usage_retention_days)))
         log.info(
             "started",

@@ -14,7 +14,7 @@ from immich_face_api.admin import create_admin_app
 from immich_face_api.app import create_app
 from immich_face_api.store import Store
 
-from .conftest import synthetic_jpeg
+from .conftest import KEY, synthetic_jpeg
 from .test_app import FACES, NEIGHBOURS, FakeDB, FakeML
 
 URL = os.environ.get("FACE_API_TEST_STORE_URL")
@@ -191,3 +191,22 @@ async def test_admin_refuses_env_client_names(store_settings):
         r = await c.post("/keys", data={"csrf": csrf, "app_name": "website"})  # "website" is an env client in conftest
         assert r.status_code == 422 and "environment" in r.text
     await app.state.face.store.close()
+
+
+async def test_api_starts_and_serves_env_keys_without_store(settings):
+    """A store outage must not take the API down: env keys work, store keys get 503, usage stays in memory."""
+    s = dataclasses.replace(settings, store_url="postgresql://nobody@127.0.0.1:9/none?connect_timeout=1")
+    app = create_app(s)
+    state = app.state.face
+    state.ml, state.db, state.ready = FakeML(FACES), FakeDB(NEIGHBOURS), True
+    await state.store.open(migrate=True, wait=False)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            img = synthetic_jpeg(200, 200)
+            r = await c.post("/v1/identify", headers={"Authorization": f"Bearer {KEY}"}, content=img)
+            assert r.status_code == 200
+            r = await c.post("/v1/identify", headers={"Authorization": "Bearer ifa_0123abcd_" + "x" * 43}, content=img)
+            assert r.status_code == 503
+        assert state.store.buffer.drain()  # counted in memory, waiting for the store
+    finally:
+        await state.store.close()

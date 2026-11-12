@@ -8,6 +8,7 @@ index), the whole key only as a SHA-256 hash, and it is shown once when it is cr
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
@@ -71,13 +72,25 @@ class Store:
         self._cache_ttl = key_cache_seconds
         self._used: set[str] = set()
         self._last_purge = 0.0
+        self._migrated = False
 
     # ---------------------------------------------------------------- lifecycle
 
-    async def open(self, migrate: bool = True) -> None:
-        await self.pool.open(wait=True, timeout=30)
-        if migrate:
+    async def open(self, migrate: bool = True, wait: bool = True) -> None:
+        """wait=False (the API): start even if the store is down; migrations are retried by flush_loop."""
+        self._migrated = not migrate
+        if wait:
+            await self.pool.open(wait=True, timeout=30)
+            await self.ensure_migrated()
+        else:
+            await self.pool.open(wait=False)
+            with contextlib.suppress(Exception):
+                await self.ensure_migrated()
+
+    async def ensure_migrated(self) -> None:
+        if not self._migrated:
             await self.migrate()
+            self._migrated = True
 
     async def close(self) -> None:
         await self.pool.close()
@@ -198,6 +211,7 @@ class Store:
         while True:
             await asyncio.sleep(interval)
             try:
+                await self.ensure_migrated()
                 await self.flush()
                 await self.purge(retention_days)
             except Exception as exc:  # noqa: BLE001 - keep counting in memory, try again later
