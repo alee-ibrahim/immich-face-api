@@ -1,0 +1,4 @@
+*
+!requirements.txt
+!immich_face_api/
+immich_face_api/__pycache__

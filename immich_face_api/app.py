@@ -1,0 +1,419 @@
+"""HTTP API: POST /v1/identify, GET /v1/people, GET /healthz, GET /readyz."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import email.parser
+import email.policy
+import json
+import logging
+import sys
+import time
+import uuid
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from prometheus_client import start_http_server
+
+from . import __version__
+from . import metrics as m
+from .config import Settings
+from .db import Database, SchemaMismatch
+from .imaging import ImageRejected, prepare
+from .matching import decide, normalise_box
+from .ml import MLClient, MLError
+from .security import ApiKeys, RateLimiter
+
+log = logging.getLogger("immich_face_api")
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        entry = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created)) + f".{int(record.msecs):03d}Z",
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        entry.update(getattr(record, "fields", {}) or {})
+        if record.exc_info and record.levelno >= logging.ERROR:
+            entry["exc"] = self.formatException(record.exc_info)
+        return json.dumps(entry, ensure_ascii=False)
+
+
+def setup_logging() -> None:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(JsonFormatter())
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(logging.INFO)
+    for noisy in ("httpx", "httpcore", "psycopg.pool", "uvicorn.access"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+def setup_sentry(settings: Settings) -> None:
+    if not settings.sentry_dsn:
+        return
+    import sentry_sdk
+
+    def scrub(event, _hint):
+        req = event.get("request")
+        if isinstance(req, dict):  # never send bodies, headers or query strings
+            for key in ("data", "headers", "cookies", "query_string", "env"):
+                req.pop(key, None)
+        return event
+
+    sentry_sdk.init(
+        dsn=settings.sentry_dsn,
+        environment=settings.environment,
+        release=f"immich-face-api@{__version__}",
+        send_default_pii=False,
+        max_request_body_size="never",
+        traces_sample_rate=0.0,
+        before_send=scrub,
+    )
+
+
+class HttpError(Exception):
+    def __init__(self, status: int, code: str, message: str, headers: dict | None = None):
+        self.status, self.code, self.message, self.headers = status, code, message, headers or {}
+
+
+def error_response(exc: HttpError) -> JSONResponse:
+    return JSONResponse(
+        {"error": {"code": exc.code, "message": exc.message}}, status_code=exc.status, headers=exc.headers
+    )
+
+
+async def read_body(request: Request, limit: int) -> bytes:
+    """Whole body into memory, refusing more than ``limit`` bytes (+ multipart overhead) without reading it all."""
+    hard = limit + 64 * 1024
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > hard:
+        raise HttpError(413, "too_large", "request body too large")
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > hard:
+            raise HttpError(413, "too_large", "request body too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def extract_image(content_type: str, body: bytes) -> bytes:
+    """The image bytes from a multipart/form-data body (field "image") or a raw body."""
+    ctype = content_type.split(";", 1)[0].strip().lower()
+    if ctype != "multipart/form-data":
+        return body
+    if "boundary=" not in content_type:
+        raise HttpError(400, "bad_request", "multipart body without boundary")
+    head = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("latin-1")
+    msg = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(head + body)
+    if not msg.is_multipart():
+        raise HttpError(400, "bad_request", "malformed multipart body")
+    for part in msg.iter_parts():
+        if part.get_param("name", header="content-disposition") == "image":
+            data = part.get_payload(decode=True)
+            if isinstance(data, bytes):
+                return data
+    raise HttpError(400, "bad_request", 'multipart field "image" is missing')
+
+
+class State:
+    def __init__(self, settings: Settings):
+        self.s = settings
+        self.keys = ApiKeys(settings.api_keys)
+        self.limiter = RateLimiter(settings.rate_limit_per_minute, settings.rate_limit_burst)
+        self.db = Database(settings)
+        self.ml = MLClient(settings.ml_url, settings.face_model, settings.min_score, settings.ml_timeout)
+        self.ml_slots = asyncio.Semaphore(settings.max_concurrent_ml)
+        self.ready = False
+        self.reason = "starting"
+
+    async def refresh_readiness(self) -> None:
+        try:
+            status = await self.db.check()
+            if not await self.ml.ping():
+                raise RuntimeError("machine-learning server not reachable")
+        except SchemaMismatch as exc:
+            self._set(False, str(exc), error=True)
+        except Exception as exc:  # noqa: BLE001
+            self._set(False, f"dependency check failed: {type(exc).__name__}: {exc}", error=False)
+        else:
+            self._set(True, f"ok (Immich {status.immich_version})")
+
+    def _set(self, ready: bool, reason: str, error: bool = False) -> None:
+        if ready != self.ready or reason != self.reason:
+            (log.error if error else log.warning if not ready else log.info)(
+                "readiness changed", extra={"fields": {"ready": ready, "reason": reason}}
+            )
+        self.ready, self.reason = ready, reason
+        m.READY.set(1 if ready else 0)
+
+    async def readiness_loop(self) -> None:
+        while True:
+            await self.refresh_readiness()
+            await asyncio.sleep(self.s.readiness_interval if self.ready else 10)
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or Settings.from_env()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        state: State = app.state.face
+        await state.db.open()
+        task = asyncio.create_task(state.readiness_loop())
+        log.info(
+            "started",
+            extra={
+                "fields": {
+                    "version": __version__,
+                    "model": settings.face_model,
+                    "min_score": settings.min_score,
+                    "max_distance": settings.max_distance,
+                    "pinned_immich": settings.expected_immich_version,
+                    "clients": sorted(settings.api_keys),
+                    "test_mode": settings.test_mode,
+                }
+            },
+        )
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await state.ml.close()
+            await state.db.close()
+
+    app = FastAPI(
+        title="immich-face-api",
+        version=__version__,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
+    app.state.face = State(settings)
+
+    @app.middleware("http")
+    async def access_log(request: Request, call_next):
+        started = time.perf_counter()
+        request.state.rid = request.headers.get("x-request-id", "")[:64] or uuid.uuid4().hex
+        request.state.client = "-"
+        request.state.fields = {}
+        try:
+            response = await call_next(request)
+        except Exception:  # pragma: no cover - FastAPI turns most errors into responses already
+            log.exception("unhandled error", extra={"fields": {"rid": request.state.rid}})
+            response = JSONResponse({"error": {"code": "internal", "message": "internal error"}}, status_code=500)
+        elapsed = time.perf_counter() - started
+        route = request.scope.get("route")
+        endpoint = getattr(route, "path", "other")
+        m.REQUESTS.labels(endpoint, str(response.status_code), request.state.client).inc()
+        m.LATENCY.labels(endpoint).observe(elapsed)
+        response.headers["X-Request-Id"] = request.state.rid
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        if endpoint not in ("/healthz", "/readyz"):
+            log.info(
+                "request",
+                extra={
+                    "fields": {
+                        "rid": request.state.rid,
+                        "method": request.method,
+                        "path": endpoint,
+                        "status": response.status_code,
+                        "ms": round(elapsed * 1000, 1),
+                        "client": request.state.client,
+                        "ip": request.headers.get("cf-connecting-ip") or "-",
+                        **request.state.fields,
+                    }
+                },
+            )
+        return response
+
+    def authenticate(request: Request) -> str:
+        state: State = request.app.state.face
+        client = state.keys.client_for(request.headers.get("authorization"))
+        if client is None:
+            m.REJECTED.labels("auth").inc()
+            raise HttpError(401, "unauthorized", "missing or invalid API key", {"WWW-Authenticate": "Bearer"})
+        request.state.client = client
+        allowed, retry_after = state.limiter.take(client)
+        if not allowed:
+            m.REJECTED.labels("rate_limit").inc()
+            raise HttpError(429, "rate_limited", "too many requests", {"Retry-After": str(retry_after)})
+        if not state.ready:
+            raise HttpError(503, "not_ready", "service not ready", {"Retry-After": "30"})
+        return client
+
+    @app.get("/healthz")
+    async def healthz():
+        return {"status": "ok"}
+
+    @app.get("/readyz")
+    async def readyz(request: Request):
+        state: State = request.app.state.face
+        if state.ready:
+            return {"status": "ready"}
+        return JSONResponse({"status": "not ready"}, status_code=503)
+
+    @app.post("/v1/identify")
+    async def identify(request: Request):
+        try:
+            authenticate(request)
+            state: State = request.app.state.face
+            s = state.s
+            candidates = _int_param(request, "candidates", 0, 0, s.max_candidates)
+            include_unnamed = request.query_params.get("include_unnamed") in ("1", "true")
+            if include_unnamed and not s.test_mode:
+                raise HttpError(400, "bad_request", "include_unnamed is only available in test mode")
+
+            body = await read_body(request, s.max_upload_bytes)
+            raw = extract_image(request.headers.get("content-type", ""), body)
+            del body
+            t0 = time.perf_counter()
+            try:
+                img = await asyncio.to_thread(
+                    prepare, raw, max_bytes=s.max_upload_bytes, max_pixels=s.max_pixels, max_edge=s.max_edge
+                )
+            except ImageRejected as exc:
+                m.REJECTED.labels("image").inc()
+                raise HttpError(exc.status, "invalid_image", str(exc)) from exc
+            finally:
+                del raw
+            m.STAGE.labels("decode").observe(time.perf_counter() - t0)
+
+            try:
+                await asyncio.wait_for(state.ml_slots.acquire(), timeout=s.ml_queue_timeout)
+            except TimeoutError as exc:
+                m.REJECTED.labels("busy").inc()
+                raise HttpError(503, "busy", "too many images in progress, retry later", {"Retry-After": "10"}) from exc
+            t1 = time.perf_counter()
+            m.INFLIGHT.inc()
+            try:
+                faces = await state.ml.detect(img.jpeg)
+            except MLError as exc:
+                m.ML_ERRORS.inc()
+                log.warning("ml error", extra={"fields": {"rid": request.state.rid, "error": str(exc)}})
+                raise HttpError(502, "upstream", "face detection failed") from exc
+            finally:
+                m.INFLIGHT.dec()
+                state.ml_slots.release()
+            m.STAGE.labels("ml").observe(time.perf_counter() - t1)
+
+            t2 = time.perf_counter()
+            try:
+                neighbours = await state.db.nearest([f.embedding for f in faces], include_unnamed=include_unnamed)
+            except Exception as exc:  # noqa: BLE001
+                m.DB_ERRORS.inc()
+                log.warning("db error", extra={"fields": {"rid": request.state.rid, "error": type(exc).__name__}})
+                raise HttpError(502, "upstream", "face search failed") from exc
+            m.STAGE.labels("db").observe(time.perf_counter() - t2)
+
+            out_faces, matched, ambiguous = [], 0, 0
+            for face, rows in zip(faces, neighbours, strict=True):
+                d = decide(
+                    rows,
+                    max_distance=s.max_distance,
+                    max_candidates=s.max_candidates,
+                    ambiguity_margin=s.ambiguity_margin,
+                )
+                best = d.best
+                entry = {
+                    "box": normalise_box(face.box, img.sent_width, img.sent_height),
+                    "detection_score": round(face.score, 4),
+                    "person_id": best.person_id if best else None,
+                    "name": best.name if best else None,
+                    "confidence": best.confidence if best else None,
+                    "distance": best.distance if best else None,
+                    "ambiguous": d.ambiguous,
+                }
+                if candidates:
+                    entry["candidates"] = [
+                        {
+                            "person_id": c.person_id,
+                            "name": c.name,
+                            "confidence": c.confidence,
+                            "distance": c.distance,
+                            "votes": c.votes,
+                        }
+                        for c in d.candidates[:candidates]
+                    ]
+                if best and best.name:
+                    matched += 1
+                    ambiguous += int(d.ambiguous)
+                out_faces.append(entry)
+            out_faces.sort(key=lambda f: (f["box"]["x"], f["box"]["y"]))
+
+            m.FACES_PER_REQUEST.observe(len(faces))
+            m.FACES.inc(len(faces))
+            m.FACES_MATCHED.inc(matched)
+            m.FACES_AMBIGUOUS.inc(ambiguous)
+            request.state.fields = {"faces": len(faces), "matched": matched, "format": img.source_format}
+            return {
+                "faces": out_faces,
+                "image": {"w": img.width, "h": img.height},
+                "model": s.face_model,
+                "max_distance": s.max_distance,
+                "immich_version": state.db.status.immich_version,
+                **({"test_mode": True} if include_unnamed else {}),
+            }
+        except HttpError as exc:
+            return error_response(exc)
+
+    @app.get("/v1/people")
+    async def people(request: Request):
+        try:
+            authenticate(request)
+            state: State = request.app.state.face
+            if not state.s.enable_people:
+                raise HttpError(404, "not_found", "not found")
+            try:
+                rows = await state.db.people()
+            except Exception as exc:  # noqa: BLE001
+                m.DB_ERRORS.inc()
+                raise HttpError(502, "upstream", "people lookup failed") from exc
+            request.state.fields = {"people": len(rows)}
+            return {"people": rows, "count": len(rows)}
+        except HttpError as exc:
+            return error_response(exc)
+
+    return app
+
+
+def _int_param(request: Request, name: str, default: int, lo: int, hi: int) -> int:
+    raw = request.query_params.get(name)
+    if raw is None:
+        return default
+    if not raw.isdigit() or not lo <= int(raw) <= hi:
+        raise HttpError(400, "bad_request", f"{name} must be an integer between {lo} and {hi}")
+    return int(raw)
+
+
+def main() -> None:  # pragma: no cover - process entry point
+    import uvicorn
+
+    setup_logging()
+    settings = Settings.from_env()
+    setup_sentry(settings)
+    if settings.metrics_port:
+        start_http_server(settings.metrics_port)
+    uvicorn.run(
+        create_app(settings),
+        host="0.0.0.0",  # noqa: S104 - in a container
+        port=8080,
+        access_log=False,
+        server_header=False,
+        proxy_headers=False,
+        log_config=None,
+        timeout_keep_alive=30,
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
