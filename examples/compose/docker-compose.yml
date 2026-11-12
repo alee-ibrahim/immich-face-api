@@ -1,0 +1,46 @@
+# immich-face-api next to an existing Immich started with Immich's own docker-compose.yml.
+#
+#   1. Create the read-only role in Immich's database (once), then set its password interactively:
+#        docker exec -i immich_postgres psql -U postgres -d immich < ../readonly-role.sql
+#        docker exec -it immich_postgres psql -U postgres -d immich
+#          immich=# \password immich_face_api
+#      and write the same password into ./db_password.txt (chmod 600).
+#   2. cp .env.example .env and fill it in (owner id: Immich -> Administration -> Users -> the user; the id is in the URL).
+#   3. Create a client key and its hash (see README "API keys") and write {"my-client": "<hash>"} to ./api-keys.json.
+#   4. docker compose up -d, then: curl -s localhost:8080/readyz
+#
+# The service joins Immich's network so it can reach "immich-machine-learning" and "database" by name. That network is
+# "<immich compose project>_default", usually "immich_default" (see: docker network ls).
+name: immich-face-api
+
+services:
+  face-api:
+    image: ghcr.io/alee-ibrahim/immich-face-api:main   # pin a version (or a digest) in production
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=16m"]
+    env_file: .env
+    environment:
+      FACE_API_ML_URL: http://immich-machine-learning:3003
+      FACE_API_DB_HOST: database
+      FACE_API_DB_SSLMODE: disable          # inside the Docker network only; use verify-full with TLS elsewhere
+      FACE_API_DB_PASSWORD_FILE: /run/secrets/db_password
+      FACE_API_API_KEYS_FILE: /run/secrets/api_keys
+    secrets: [db_password, api_keys]
+    ports:
+      - "127.0.0.1:8080:8080"   # put a TLS reverse proxy in front; never publish it bare
+    networks: [immich]
+
+secrets:
+  db_password:
+    file: ./db_password.txt
+  api_keys:
+    file: ./api-keys.json
+
+networks:
+  immich:
+    name: ${IMMICH_NETWORK:-immich_default}
+    external: true

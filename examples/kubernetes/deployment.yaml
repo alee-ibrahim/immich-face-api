@@ -1,0 +1,65 @@
+# Plain Kubernetes example. Adjust names, labels and the namespace to your Immich install.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: immich-face-api
+  labels: { app.kubernetes.io/name: immich-face-api }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app.kubernetes.io/name: immich-face-api }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: immich-face-api }
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: api
+          image: ghcr.io/alee-ibrahim/immich-face-api:main   # pin a version and digest
+          env:
+            - { name: FACE_API_ML_URL, value: "http://immich-machine-learning:3003" }
+            - { name: FACE_API_FACE_MODEL, value: buffalo_l }       # = Immich config
+            - { name: FACE_API_MIN_SCORE, value: "0.7" }            # = Immich config
+            - { name: FACE_API_MAX_DISTANCE, value: "0.5" }
+            - { name: FACE_API_EXPECTED_IMMICH_VERSION, value: "3.4.1" }
+            - { name: FACE_API_OWNER_ID, value: "00000000-0000-0000-0000-000000000000" }
+            - { name: FACE_API_DB_HOST, value: immich-postgres }
+            - { name: FACE_API_DB_SSLMODE, value: require }         # prefer verify-full + FACE_API_DB_SSLROOTCERT
+            - { name: FACE_API_DB_PASSWORD_FILE, value: /secrets/db-password }
+            - { name: FACE_API_API_KEYS_FILE, value: /secrets/api-keys.json }
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: metrics, containerPort: 9090 }
+          startupProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 2, failureThreshold: 30 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 20 }
+          readinessProbe: { httpGet: { path: /readyz, port: http }, periodSeconds: 10 }
+          resources:
+            requests: { cpu: 100m, memory: 192Mi }
+            limits: { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: secrets, mountPath: /secrets, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: secrets
+          secret: { secretName: immich-face-api }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: immich-face-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: immich-face-api }

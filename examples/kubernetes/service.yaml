@@ -1,0 +1,12 @@
+# Route only /v1/identify, /v1/people and /healthz through your ingress or gateway. Keep /readyz,
+# /openapi.json and the metrics port (9090) internal.
+apiVersion: v1
+kind: Service
+metadata:
+  name: immich-face-api
+  labels: { app.kubernetes.io/name: immich-face-api }
+spec:
+  selector: { app.kubernetes.io/name: immich-face-api }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+    - { name: metrics, port: 9090, targetPort: metrics }

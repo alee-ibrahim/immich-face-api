@@ -1,0 +1,80 @@
+# Lint + tests on every push and pull request. Image: built and scanned (Trivy, fails on Critical) on every
+# run; pushed to GHCR only for pushes to this repository (never for pull requests from forks):
+#   ghcr.io/<owner>/immich-face-api:sha-<12 chars>   every pushed commit
+#   ghcr.io/<owner>/immich-face-api:main             the newest commit on main
+# Releases (tags vX.Y.Z: multi-arch, signed, SBOM) are built by release.yml.
+# Deployments should pin the digest printed in the job summary.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check . && ruff format --check .
+      - run: python -m pytest -q
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      PUSH: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+      TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.69.3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Names
+        id: n
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+      - name: Build
+        run: |
+          docker build --pull \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+            -t "${{ steps.n.outputs.image }}:sha-${{ steps.n.outputs.sha }}" .
+      - name: Smoke test (imports, non-root)
+        run: |
+          docker run --rm --read-only --entrypoint python "${{ steps.n.outputs.image }}:sha-${{ steps.n.outputs.sha }}" \
+            -c "import os, pillow_heif, immich_face_api.app; assert os.getuid() == 65532"
+      - name: Trivy (fail on Critical, report High)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" image --quiet \
+            --scanners vuln --severity HIGH,CRITICAL "${{ steps.n.outputs.image }}:sha-${{ steps.n.outputs.sha }}"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" image --quiet \
+            --scanners vuln --severity CRITICAL --exit-code 1 "${{ steps.n.outputs.image }}:sha-${{ steps.n.outputs.sha }}"
+      - name: Push
+        if: env.PUSH == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          img="${{ steps.n.outputs.image }}"
+          docker push "$img:sha-${{ steps.n.outputs.sha }}"
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            docker tag "$img:sha-${{ steps.n.outputs.sha }}" "$img:main"; docker push "$img:main"
+          fi
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$img:sha-${{ steps.n.outputs.sha }}")"
+          echo "### Image" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$img:sha-${{ steps.n.outputs.sha }}@${digest#*@}\`" >> "$GITHUB_STEP_SUMMARY"

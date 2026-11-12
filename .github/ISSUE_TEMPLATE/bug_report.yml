@@ -1,0 +1,40 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security problems: do not file them here**, use a private advisory (see SECURITY.md).
+        **Never attach photos of real people, embeddings, API keys or database dumps.**
+  - type: input
+    id: version
+    attributes:
+      label: immich-face-api version
+      description: Image tag or digest
+    validations:
+      required: true
+  - type: input
+    id: immich
+    attributes:
+      label: Immich version
+      placeholder: "3.4.1"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Requests (without keys), status codes, the "readiness changed" log line if relevant.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Service log lines around the problem. Remove anything private.
+      render: text
