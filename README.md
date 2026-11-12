@@ -320,8 +320,8 @@ server) and always correct.
 
 | Layer | What it does |
 | --- | --- |
-| Transport | plain HTTP on 8080; put a TLS reverse proxy in front. For internet exposure add an authenticating proxy (access-service token, IP allowlist, rate limit) |
-| Authentication | per-client API key; only SHA-256 hashes are configured; constant-time compare over all keys |
+| Transport | plain HTTP on 8080; put a TLS reverse proxy in front. The API key is the authentication and is enough on its own; for internet exposure add a body-size cap, a timeout and a per-IP rate limit at the proxy. An IP allowlist or an access-service token at the proxy is optional extra hardening |
+| Authentication | per-client API key; only SHA-256 hashes are configured; constant-time compare over all keys. Checked **first**: before the request body is read or decoded and before any ML or database call, so an unauthenticated request costs one hash |
 | Authorization | a client can identify and list named people; nothing else exists |
 | Abuse | token bucket per client, bounded ML concurrency with queue timeout, 15 MB / 50 MP limits, no OpenAPI UI, metrics on another port |
 | Input | magic bytes, one decoder per format, pixel limit before decoding, first frame only, metadata never passed on |

@@ -14,7 +14,8 @@ Only the newest release (and `main`) gets security fixes.
 ## Threat model in short
 
 immich-face-api is meant to be called **server to server** by a trusted back end, behind a TLS reverse proxy
-(ideally one that also authenticates, e.g. an access-service token and an IP allowlist). It assumes:
+(with a body-size cap, a timeout and a per-IP rate limit; an IP allowlist or an access-service token is optional
+extra hardening, the API key is the authentication). It assumes:
 
 - the network between it and Immich (ML server, PostgreSQL) is trusted or encrypted (`FACE_API_DB_SSLMODE=verify-full`);
 - its database role is the read-only role from `examples/readonly-role.sql`;
