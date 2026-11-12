@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Try it{% endblock %}
+{% block body %}
+<h1>Try it</h1>
+<div class="panel">
+  <form id="try-form" class="row" data-csrf="{{ csrf }}">
+    <label class="grow">Photo (JPEG, PNG, WebP or HEIC, up to {{ max_mb }} MB)
+      <input type="file" name="image" required accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif"></label>
+    <button>Who is this?</button>
+  </form>
+  <p class="muted">Runs the same pipeline as <code>POST /v1/identify</code> with 3 candidates. The photo is shown from your
+  browser's memory; the server keeps nothing and does not count this in the usage statistics.</p>
+</div>
+<div id="message" class="notice hidden"></div>
+<div id="stage" class="stage hidden"><img id="photo" alt="The uploaded photo with the detected faces outlined"></div>
+<div class="scroll"><table class="cards">
+  <thead><tr><th>#</th><th>Name</th><th>Distance</th><th>Ambiguous</th><th>Candidates</th></tr></thead>
+  <tbody id="result"></tbody>
+</table></div>
+<script src="/static/try.js"></script>
+{% endblock %}

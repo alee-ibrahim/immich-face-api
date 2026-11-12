@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Optional admin UI (`python -m immich_face_api admin`, port 8081): dashboard and per-app usage (requests, faces,
+  match and unknown rate, latency p50/p95, errors over time), apps and API keys (shown once, owner, label, rate limit
+  per key, expiry, revoke, last used, audit list), and a "Try it" page. OIDC sign-in with an optional admin claim
+  filter, or a bootstrap token locally. Server-rendered, strict CSP, CSRF tokens.
+- Optional own PostgreSQL store (`FACE_API_STORE_URL`): UI-made keys (`ifa_<prefix>_<secret>`, SHA-256) accepted by
+  the API next to the environment keys, and hourly usage aggregates (counts only), with retention.
 - Tests proving the API key is checked before the body is read and before any ML/DB call.
 
 ### Changed

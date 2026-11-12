@@ -133,6 +133,30 @@ class Settings:
     sentry_dsn: str | None = field(default=None, repr=False)
     environment: str = "production"
 
+    # optional store (own PostgreSQL, never Immich's): API keys made in the admin UI + hourly usage aggregates
+    store_url: str | None = field(default=None, repr=False)
+    store_password: str | None = field(default=None, repr=False)
+    store_pool_size: int = 4
+    usage_retention_days: int = 400
+    key_cache_seconds: int = 30
+
+    # optional admin UI (python -m immich_face_api admin), its own port
+    admin_port: int = 8081
+    public_url: str = ""
+    session_secret: str = field(default="", repr=False)
+    session_https_only: bool = True
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = field(default="", repr=False)
+    oidc_scopes: str = "openid email profile"
+    oidc_admin_claim: str = ""
+    oidc_admin_values: tuple[str, ...] = ()
+    admin_token: str = field(default="", repr=False)
+
+    @property
+    def oidc_enabled(self) -> bool:
+        return bool(self.oidc_issuer and self.oidc_client_id and self.oidc_client_secret)
+
     @classmethod
     def from_env(cls) -> Settings:
         ml_url = _env("ML_URL")
@@ -148,8 +172,13 @@ class Settings:
             except ValueError as exc:
                 raise ConfigError(f"{PREFIX}OWNER_ID must be a UUID") from exc
         keys_text = _secret("API_KEYS")
-        if not keys_text:
-            raise ConfigError(f"{PREFIX}API_KEYS_FILE (or {PREFIX}API_KEYS) is required")
+        store_url = _secret("STORE_URL")
+        if not keys_text and not store_url:
+            raise ConfigError(f"{PREFIX}API_KEYS_FILE (or {PREFIX}API_KEYS) or {PREFIX}STORE_URL is required")
+        issuer = _env("OIDC_ISSUER", "")
+        if not issuer and _env("OIDC_TENANT_ID"):  # Microsoft Entra shortcut
+            issuer = f"https://login.microsoftonline.com/{_env('OIDC_TENANT_ID')}/v2.0"
+        admin_values = tuple(v.strip() for v in (_env("OIDC_ADMIN_VALUES", "") or "").split(",") if v.strip())
         sslmode = _env("DB_SSLMODE", "verify-full")
         if sslmode not in ("disable", "require", "verify-ca", "verify-full"):
             raise ConfigError(f"{PREFIX}DB_SSLMODE: unsupported value")
@@ -175,7 +204,7 @@ class Settings:
             ambiguity_margin=_float("AMBIGUITY_MARGIN", 0.03, 0.0, 0.5),
             max_upload_bytes=_int("MAX_UPLOAD_BYTES", 15 * 1024 * 1024, 1024, 100 * 1024 * 1024),
             max_pixels=_int("MAX_PIXELS", 50_000_000, 10_000, 200_000_000),
-            api_keys=parse_api_keys(keys_text),
+            api_keys=parse_api_keys(keys_text) if keys_text else {},
             rate_limit_per_minute=_int("RATE_LIMIT_PER_MINUTE", 30, 1, 100_000),
             rate_limit_burst=_int("RATE_LIMIT_BURST", 10, 1, 100_000),
             max_concurrent_ml=_int("MAX_CONCURRENT_ML", 2, 1, 64),
@@ -188,4 +217,20 @@ class Settings:
             readiness_interval=_int("READINESS_INTERVAL", 60, 5, 3600),
             sentry_dsn=_secret("SENTRY_DSN"),
             environment=_env("ENVIRONMENT", "production"),
+            store_url=store_url,
+            store_password=_secret("STORE_PASSWORD"),
+            store_pool_size=_int("STORE_POOL_SIZE", 4, 1, 32),
+            usage_retention_days=_int("USAGE_RETENTION_DAYS", 400, 1, 3650),
+            key_cache_seconds=_int("KEY_CACHE_SECONDS", 30, 0, 600),
+            admin_port=_int("ADMIN_PORT", 8081, 1, 65535),
+            public_url=(_env("PUBLIC_URL", "") or "").rstrip("/"),
+            session_secret=_secret("SESSION_SECRET") or "",
+            session_https_only=_bool("SESSION_HTTPS_ONLY", True),
+            oidc_issuer=issuer.rstrip("/"),
+            oidc_client_id=_secret("OIDC_CLIENT_ID") or "",
+            oidc_client_secret=_secret("OIDC_CLIENT_SECRET") or "",
+            oidc_scopes=_env("OIDC_SCOPES", "openid email profile"),
+            oidc_admin_claim=_env("OIDC_ADMIN_CLAIM", "") or "",
+            oidc_admin_values=admin_values,
+            admin_token=_secret("ADMIN_TOKEN") or "",
         )

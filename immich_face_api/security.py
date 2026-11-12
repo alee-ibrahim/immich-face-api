@@ -53,14 +53,19 @@ class RateLimiter:
         self._buckets: dict[str, tuple[float, float]] = {}
         self._lock = threading.Lock()
 
-    def take(self, client: str) -> tuple[bool, int]:
-        """(allowed, retry_after_seconds)."""
+    def take(self, client: str, per_minute: int | None = None) -> tuple[bool, int]:
+        """(allowed, retry_after_seconds). ``per_minute`` overrides the default rate for this client (store keys);
+        the burst then scales with it (at most the rate per minute)."""
+        rate = per_minute / 60.0 if per_minute else self.rate
+        burst = min(self.burst, float(per_minute)) if per_minute else self.burst
+        if per_minute and per_minute > 60 * self.rate:
+            burst = max(self.burst, per_minute / 6.0)
         now = self._clock()
         with self._lock:
-            tokens, last = self._buckets.get(client, (self.burst, now))
-            tokens = min(self.burst, tokens + (now - last) * self.rate)
+            tokens, last = self._buckets.get(client, (burst, now))
+            tokens = min(burst, tokens + (now - last) * rate)
             if tokens >= 1.0:
                 self._buckets[client] = (tokens - 1.0, now)
                 return True, 0
             self._buckets[client] = (tokens, now)
-            return False, max(1, math.ceil((1.0 - tokens) / self.rate))
+            return False, max(1, math.ceil((1.0 - tokens) / rate))

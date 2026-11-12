@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Usage{% endblock %}
+{% block body %}
+<h1>Usage{% if client %}: {{ client }}{% endif %}</h1>
+<form method="get" action="/usage" class="filters">
+  <select name="client" aria-label="App">
+    <option value="">All apps</option>
+    {% for name in clients %}<option value="{{ name }}" {{ 'selected' if name == client }}>{{ name }}</option>{% endfor %}
+  </select>
+  <select name="range" aria-label="Period">
+    {% for r in ("24h", "7d", "30d", "90d") %}<option {{ 'selected' if r == range }}>{{ r }}</option>{% endfor %}
+  </select>
+  <button class="ghost">Show</button>
+</form>
+{% include "_usage.html" %}
+{% endblock %}

@@ -8,7 +8,7 @@
 a photo; it finds the faces and returns, for each one, the **named Immich person** it most likely shows (or `null`).
 
 - [Why](#why) · [How it works](#how-it-works) · [Quick start](#quick-start-docker-compose) · [Configuration](#configuration)
-- [API](#api) · [Client examples](#client-examples) · [Matching](#the-matching-algorithm) · [Security](#security-model)
+- [Admin UI](#admin-ui-optional) · [API](#api) · [Client examples](#client-examples) · [Matching](#the-matching-algorithm) · [Security](#security-model)
 - [Privacy](#privacy-and-biometric-data) · [Compatibility](#compatibility-and-the-version-pin) · [Upgrading](#upgrading-immich)
 - [Troubleshooting](#troubleshooting) · [FAQ](#faq) · [Limitations](#limitations) · [Development](#development)
 
@@ -45,6 +45,11 @@ flowchart LR
     api -- "read-only SQL (TLS)<br/>nearest named faces" --> db
     prom -. ":9090/metrics" .-> api
     api -. errors .-> sentry
+    admin["admin UI (optional)<br/>:8081, internal only, OIDC"]
+    store[("own PostgreSQL (optional)<br/>API keys, hourly usage counts")]
+    api -- "key lookup, usage counts" --> store
+    admin --> store
+    admin -- "Try it" --> ml
 ```
 
 For each request:
@@ -155,6 +160,58 @@ metrics, never the key.
 [`examples/readonly-role.sql`](examples/readonly-role.sql): `SELECT` on `person`, `asset_face`, `face_search`,
 `version_history` only, read-only transactions, a TLS-only `pg_hba` line. The service also sets
 `default_transaction_read_only` and a 15 s statement timeout on every connection.
+
+## Admin UI (optional)
+
+A small web UI for the people who run the service: **usage analytics** and **API keys per app**. It is a separate
+process from the same image (`python -m immich_face_api admin`, port **8081**). Keep it on an internal network and
+never route it publicly; the API port (8080) never serves it.
+
+| Page | What |
+| --- | --- |
+| Dashboard | identify requests, faces detected, match rate, unknown rate, latency p50/p95, errors and refusals for 24 h / 7 d / 30 d / 90 d; charts per hour or day; per-app table |
+| Usage | the same for one app, with a table view |
+| Apps & keys | create a key for an app (owner, label, rate limit per minute, expiry); the key is **shown once**; revoke; last used; an audit list of who created or revoked what. Keys from `FACE_API_API_KEYS` are listed read-only |
+| Try it | upload a photo, see the boxes and names drawn over it (same pipeline as `/v1/identify`); nothing is stored or counted |
+
+**Keys made in the UI** look like `ifa_<8 hex>_<43 random characters>`. The prefix is stored in clear (to tell keys
+apart and to find them), the whole key only as SHA-256; it is compared in constant time. A key can carry its own rate
+limit and an expiry; revoking takes effect within `FACE_API_KEY_CACHE_SECONDS` (30 s). Keys from the environment keep
+working unchanged, so existing clients need no change; to move one into the UI, create a key for it there, switch the
+client, then remove it from `FACE_API_API_KEYS`.
+
+**Store.** Keys and analytics need the service's **own** small PostgreSQL (`FACE_API_STORE_URL`), never Immich's
+database: Immich stays read-only. Tables are created on start (`immich_face_api/migrations/`). Analytics are hourly
+**aggregates only** (counts per app and endpoint, and a latency histogram): no images, embeddings, names, IP addresses
+or keys; kept `FACE_API_USAGE_RETENTION_DAYS` (400). The API pods write their counts every 30 s.
+
+**Sign-in.** Any OpenID Connect provider (`FACE_API_OIDC_ISSUER`, or `FACE_API_OIDC_TENANT_ID` for Microsoft Entra,
+plus client id and secret; redirect URI `<FACE_API_PUBLIC_URL>/auth/callback`). Who may sign in: by default whoever the
+provider lets through (for example an Entra app with *Assignment required*); to require a claim, set
+`FACE_API_OIDC_ADMIN_CLAIM` (e.g. `roles` or `groups`) and `FACE_API_OIDC_ADMIN_VALUES` (comma-separated). Without
+OIDC, a bootstrap admin token (`FACE_API_ADMIN_TOKEN`) signs in, for local use. Sessions are signed cookies (8 h,
+`SameSite=Lax`, `Secure`), every form carries a CSRF token, and a strict Content-Security-Policy allows no inline script
+or style.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `FACE_API_STORE_URL` / `_FILE` | | the store, e.g. `postgresql://face_api@store-host:5432/face_api?sslmode=verify-full&sslrootcert=/ca.crt`. Enables UI-made keys and analytics in the API too |
+| `FACE_API_STORE_PASSWORD` / `_FILE` | | store password (kept out of the URL) |
+| `FACE_API_STORE_POOL_SIZE` | `4` | |
+| `FACE_API_USAGE_RETENTION_DAYS` | `400` | hourly aggregates older than this are deleted |
+| `FACE_API_KEY_CACHE_SECONDS` | `30` | how long a key lookup is cached (a revoke takes effect within this) |
+| `FACE_API_ADMIN_PORT` | `8081` | admin UI port |
+| `FACE_API_PUBLIC_URL` | | the admin UI's own URL, e.g. `https://faces-admin.example.org` (OIDC redirect) |
+| `FACE_API_SESSION_SECRET` / `_FILE` | | at least 32 random characters; required with OIDC |
+| `FACE_API_SESSION_HTTPS_ONLY` | `true` | `Secure` cookie; `false` only for local plain HTTP |
+| `FACE_API_OIDC_ISSUER` | | issuer URL (discovery at `/.well-known/openid-configuration`) |
+| `FACE_API_OIDC_TENANT_ID` | | Microsoft Entra shortcut for the issuer |
+| `FACE_API_OIDC_CLIENT_ID` / `_FILE`, `FACE_API_OIDC_CLIENT_SECRET` / `_FILE` | | |
+| `FACE_API_OIDC_SCOPES` | `openid email profile` | |
+| `FACE_API_OIDC_ADMIN_CLAIM`, `FACE_API_OIDC_ADMIN_VALUES` | | optional claim filter (see above) |
+| `FACE_API_ADMIN_TOKEN` / `_FILE` | | bootstrap sign-in when OIDC is not configured |
+
+With a store configured, `FACE_API_API_KEYS` becomes optional.
 
 ## API
 

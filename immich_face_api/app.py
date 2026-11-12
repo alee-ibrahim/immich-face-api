@@ -12,6 +12,7 @@ import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -27,6 +28,7 @@ from .ml import MLClient, MLError
 from .openapi import OPENAPI_SPEC
 from .scrub import scrub_breadcrumb, scrub_event
 from .security import ApiKeys, RateLimiter
+from .store import Store, split_key
 
 log = logging.getLogger("immich_face_api")
 
@@ -127,6 +129,11 @@ class State:
         self.db = Database(settings)
         self.ml = MLClient(settings.ml_url, settings.face_model, settings.min_score, settings.ml_timeout)
         self.ml_slots = asyncio.Semaphore(settings.max_concurrent_ml)
+        self.store = (
+            Store(settings.store_url, settings.store_password, settings.store_pool_size, settings.key_cache_seconds)
+            if settings.store_url
+            else None
+        )
         self.ready = False
         self.reason = "starting"
 
@@ -135,6 +142,8 @@ class State:
             status = await self.db.check()
             if not await self.ml.ping():
                 raise RuntimeError("machine-learning server not reachable")
+            if self.store and not await self.store.ping():
+                raise RuntimeError("store database not reachable")
         except SchemaMismatch as exc:
             self._set(False, str(exc), error=True)
         except Exception as exc:  # noqa: BLE001
@@ -150,6 +159,99 @@ class State:
         self.ready, self.reason = ready, reason
         m.READY.set(1 if ready else 0)
 
+    async def identify(self, raw: bytes, *, candidates: int = 0, include_unnamed: bool = False, rid: str = "") -> dict:
+        """The whole pipeline for one image (validate, detect, search, decide). Raises HttpError."""
+        s = self.s
+        state = self
+        t0 = time.perf_counter()
+        try:
+            img = await asyncio.to_thread(
+                prepare, raw, max_bytes=s.max_upload_bytes, max_pixels=s.max_pixels, max_edge=s.max_edge
+            )
+        except ImageRejected as exc:
+            m.REJECTED.labels("image").inc()
+            raise HttpError(exc.status, "invalid_image", str(exc)) from exc
+        finally:
+            del raw
+        m.STAGE.labels("decode").observe(time.perf_counter() - t0)
+
+        try:
+            await asyncio.wait_for(state.ml_slots.acquire(), timeout=s.ml_queue_timeout)
+        except TimeoutError as exc:
+            m.REJECTED.labels("busy").inc()
+            raise HttpError(503, "busy", "too many images in progress, retry later", {"Retry-After": "10"}) from exc
+        t1 = time.perf_counter()
+        m.INFLIGHT.inc()
+        try:
+            faces = await state.ml.detect(img.jpeg)
+        except MLError as exc:
+            m.ML_ERRORS.inc()
+            log.warning("ml error", extra={"fields": {"rid": rid, "error": str(exc)}})
+            raise HttpError(502, "upstream", "face detection failed") from exc
+        finally:
+            m.INFLIGHT.dec()
+            state.ml_slots.release()
+        m.STAGE.labels("ml").observe(time.perf_counter() - t1)
+
+        t2 = time.perf_counter()
+        try:
+            neighbours = await state.db.nearest([f.embedding for f in faces], include_unnamed=include_unnamed)
+        except Exception as exc:  # noqa: BLE001
+            m.DB_ERRORS.inc()
+            # unexpected: reported to Sentry/GlitchTip (scrubbed), unlike transient ML errors
+            log.error("db error", exc_info=True, extra={"fields": {"rid": rid, "error": type(exc).__name__}})
+            raise HttpError(502, "upstream", "face search failed") from exc
+        m.STAGE.labels("db").observe(time.perf_counter() - t2)
+
+        out_faces, matched, ambiguous = [], 0, 0
+        for face, rows in zip(faces, neighbours, strict=True):
+            d = decide(
+                rows,
+                max_distance=s.max_distance,
+                max_candidates=s.max_candidates,
+                ambiguity_margin=s.ambiguity_margin,
+            )
+            best = d.best
+            entry = {
+                "box": normalise_box(face.box, img.sent_width, img.sent_height),
+                "detection_score": round(face.score, 4),
+                "person_id": best.person_id if best else None,
+                "name": best.name if best else None,
+                "confidence": best.confidence if best else None,
+                "distance": best.distance if best else None,
+                "ambiguous": d.ambiguous,
+            }
+            if candidates:
+                entry["candidates"] = [
+                    {
+                        "person_id": c.person_id,
+                        "name": c.name,
+                        "confidence": c.confidence,
+                        "distance": c.distance,
+                        "votes": c.votes,
+                    }
+                    for c in d.candidates[:candidates]
+                ]
+            if best and best.name:
+                matched += 1
+                ambiguous += int(d.ambiguous)
+            out_faces.append(entry)
+        out_faces.sort(key=lambda f: (f["box"]["x"], f["box"]["y"]))
+
+        m.FACES_PER_REQUEST.observe(len(faces))
+        m.FACES.inc(len(faces))
+        m.FACES_MATCHED.inc(matched)
+        m.FACES_AMBIGUOUS.inc(ambiguous)
+        return {
+            "faces": out_faces,
+            "image": {"w": img.width, "h": img.height},
+            "model": s.face_model,
+            "max_distance": s.max_distance,
+            "immich_version": state.db.status.immich_version,
+            **({"test_mode": True} if include_unnamed else {}),
+            "_stats": {"faces": len(faces), "matched": matched, "ambiguous": ambiguous, "format": img.source_format},
+        }
+
     async def readiness_loop(self) -> None:
         while True:
             await self.refresh_readiness()
@@ -163,7 +265,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         state: State = app.state.face
         await state.db.open()
-        task = asyncio.create_task(state.readiness_loop())
+        tasks = [asyncio.create_task(state.readiness_loop())]
+        if state.store:
+            await state.store.open(migrate=True)
+            tasks.append(asyncio.create_task(state.store.flush_loop(settings.usage_retention_days)))
         log.info(
             "started",
             extra={
@@ -174,6 +279,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "max_distance": settings.max_distance,
                     "pinned_immich": settings.expected_immich_version,
                     "clients": sorted(settings.api_keys),
+                    "store": bool(settings.store_url),
                     "test_mode": settings.test_mode,
                 }
             },
@@ -181,9 +287,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            for task in tasks:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            if state.store:
+                with contextlib.suppress(Exception):
+                    await state.store.flush()
+                await state.store.close()
             await state.ml.close()
             await state.db.close()
 
@@ -212,6 +323,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         route = request.scope.get("route")
         endpoint = getattr(route, "path", "other")
         m.REQUESTS.labels(endpoint, str(response.status_code), request.state.client).inc()
+        store = request.app.state.face.store
+        if store and request.state.client != "-" and endpoint.startswith("/v1/"):
+            f = request.state.fields
+            store.buffer.record(
+                request.state.client,
+                endpoint,
+                response.status_code,
+                elapsed * 1000,
+                faces=f.get("faces", 0),
+                matched=f.get("matched", 0),
+                ambiguous=f.get("ambiguous", 0),
+            )
         m.LATENCY.labels(endpoint).observe(elapsed)
         response.headers["X-Request-Id"] = request.state.rid
         response.headers["Cache-Control"] = "no-store"
@@ -234,14 +357,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return response
 
-    def authenticate(request: Request) -> str:
+    async def authenticate(request: Request) -> str:
+        """API key first (env keys, then store keys), then the rate limit, then readiness. Runs before the body is
+        read and before any ML or Immich call."""
         state: State = request.app.state.face
-        client = state.keys.client_for(request.headers.get("authorization"))
+        header = request.headers.get("authorization")
+        client = state.keys.client_for(header)
+        per_minute = None
+        if client is None and state.store and header:
+            scheme, _, token = header.partition(" ")
+            token = token.strip()
+            prefix = split_key(token) if scheme.lower() == "bearer" and len(token) <= 512 else None
+            if prefix:
+                try:
+                    key = await state.store.lookup(prefix)
+                except Exception:  # noqa: BLE001 - store down: env keys still work, store keys cannot be checked
+                    log.warning("store lookup failed")
+                    raise HttpError(503, "not_ready", "service not ready", {"Retry-After": "30"}) from None
+                if key and key.valid(token, datetime.now(UTC)):
+                    client, per_minute = key.app, key.rate_limit_per_minute
+                    state.store.mark_used(key.id)
         if client is None:
             m.REJECTED.labels("auth").inc()
             raise HttpError(401, "unauthorized", "missing or invalid API key", {"WWW-Authenticate": "Bearer"})
         request.state.client = client
-        allowed, retry_after = state.limiter.take(client)
+        allowed, retry_after = state.limiter.take(client, per_minute)
         if not allowed:
             m.REJECTED.labels("rate_limit").inc()
             raise HttpError(429, "rate_limited", "too many requests", {"Retry-After": str(retry_after)})
@@ -269,7 +409,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/v1/identify")
     async def identify(request: Request):
         try:
-            authenticate(request)
+            await authenticate(request)
             state: State = request.app.state.face
             s = state.s
             candidates = _int_param(request, "candidates", 0, 0, s.max_candidates)
@@ -280,103 +420,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body = await read_body(request, s.max_upload_bytes)
             raw = extract_image(request.headers.get("content-type", ""), body)
             del body
-            t0 = time.perf_counter()
-            try:
-                img = await asyncio.to_thread(
-                    prepare, raw, max_bytes=s.max_upload_bytes, max_pixels=s.max_pixels, max_edge=s.max_edge
-                )
-            except ImageRejected as exc:
-                m.REJECTED.labels("image").inc()
-                raise HttpError(exc.status, "invalid_image", str(exc)) from exc
-            finally:
-                del raw
-            m.STAGE.labels("decode").observe(time.perf_counter() - t0)
-
-            try:
-                await asyncio.wait_for(state.ml_slots.acquire(), timeout=s.ml_queue_timeout)
-            except TimeoutError as exc:
-                m.REJECTED.labels("busy").inc()
-                raise HttpError(503, "busy", "too many images in progress, retry later", {"Retry-After": "10"}) from exc
-            t1 = time.perf_counter()
-            m.INFLIGHT.inc()
-            try:
-                faces = await state.ml.detect(img.jpeg)
-            except MLError as exc:
-                m.ML_ERRORS.inc()
-                log.warning("ml error", extra={"fields": {"rid": request.state.rid, "error": str(exc)}})
-                raise HttpError(502, "upstream", "face detection failed") from exc
-            finally:
-                m.INFLIGHT.dec()
-                state.ml_slots.release()
-            m.STAGE.labels("ml").observe(time.perf_counter() - t1)
-
-            t2 = time.perf_counter()
-            try:
-                neighbours = await state.db.nearest([f.embedding for f in faces], include_unnamed=include_unnamed)
-            except Exception as exc:  # noqa: BLE001
-                m.DB_ERRORS.inc()
-                # unexpected: reported to Sentry/GlitchTip (scrubbed), unlike transient ML errors
-                log.error(
-                    "db error", exc_info=True, extra={"fields": {"rid": request.state.rid, "error": type(exc).__name__}}
-                )
-                raise HttpError(502, "upstream", "face search failed") from exc
-            m.STAGE.labels("db").observe(time.perf_counter() - t2)
-
-            out_faces, matched, ambiguous = [], 0, 0
-            for face, rows in zip(faces, neighbours, strict=True):
-                d = decide(
-                    rows,
-                    max_distance=s.max_distance,
-                    max_candidates=s.max_candidates,
-                    ambiguity_margin=s.ambiguity_margin,
-                )
-                best = d.best
-                entry = {
-                    "box": normalise_box(face.box, img.sent_width, img.sent_height),
-                    "detection_score": round(face.score, 4),
-                    "person_id": best.person_id if best else None,
-                    "name": best.name if best else None,
-                    "confidence": best.confidence if best else None,
-                    "distance": best.distance if best else None,
-                    "ambiguous": d.ambiguous,
-                }
-                if candidates:
-                    entry["candidates"] = [
-                        {
-                            "person_id": c.person_id,
-                            "name": c.name,
-                            "confidence": c.confidence,
-                            "distance": c.distance,
-                            "votes": c.votes,
-                        }
-                        for c in d.candidates[:candidates]
-                    ]
-                if best and best.name:
-                    matched += 1
-                    ambiguous += int(d.ambiguous)
-                out_faces.append(entry)
-            out_faces.sort(key=lambda f: (f["box"]["x"], f["box"]["y"]))
-
-            m.FACES_PER_REQUEST.observe(len(faces))
-            m.FACES.inc(len(faces))
-            m.FACES_MATCHED.inc(matched)
-            m.FACES_AMBIGUOUS.inc(ambiguous)
-            request.state.fields = {"faces": len(faces), "matched": matched, "format": img.source_format}
-            return {
-                "faces": out_faces,
-                "image": {"w": img.width, "h": img.height},
-                "model": s.face_model,
-                "max_distance": s.max_distance,
-                "immich_version": state.db.status.immich_version,
-                **({"test_mode": True} if include_unnamed else {}),
-            }
+            result = await state.identify(
+                raw, candidates=candidates, include_unnamed=include_unnamed, rid=request.state.rid
+            )
+            del raw
+            stats = result.pop("_stats")
+            request.state.fields = stats
+            return result
         except HttpError as exc:
             return error_response(exc)
 
     @app.get("/v1/people")
     async def people(request: Request):
         try:
-            authenticate(request)
+            await authenticate(request)
             state: State = request.app.state.face
             if not state.s.enable_people:
                 raise HttpError(404, "not_found", "not found")
