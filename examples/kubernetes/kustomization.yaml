@@ -1,0 +1,8 @@
+# kubectl apply -k examples/kubernetes   (after editing the files and creating the Secret)
+# Secret "immich-face-api" with keys db-password and api-keys.json: create it from your secret manager
+# (see secret.example.yaml); never commit real values.
+namespace: immich
+resources:
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml

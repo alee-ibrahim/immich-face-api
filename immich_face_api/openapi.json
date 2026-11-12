@@ -1,0 +1,531 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "immich-face-api",
+    "version": "0.1.0",
+    "summary": "Who is in this photo? Faces matched against the named people of an Immich library.",
+    "description": "Server-to-server API. Every /v1 call needs `Authorization: Bearer <api key>`. Results are suggestions for a human to confirm. Nothing is stored.",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://faces.example.org"
+    }
+  ],
+  "security": [
+    {
+      "bearer": []
+    }
+  ],
+  "paths": {
+    "/v1/identify": {
+      "post": {
+        "operationId": "identify",
+        "summary": "Find faces in a photo and match them to named people",
+        "parameters": [
+          {
+            "name": "candidates",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 20,
+              "default": 0
+            },
+            "description": "Also return up to N ranked candidates per face (capped by FACE_API_MAX_CANDIDATES, default 5)."
+          },
+          {
+            "name": "include_unnamed",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ]
+            },
+            "description": "Test mode only (FACE_API_TEST_MODE=true): also match unnamed person clusters. 400 otherwise."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "image"
+                ],
+                "properties": {
+                  "image": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "JPEG, PNG, WebP or HEIC/HEIF"
+                  }
+                }
+              }
+            },
+            "image/jpeg": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/png": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/webp": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/heic": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Faces found (possibly none)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentifyResponse"
+                },
+                "example": {
+                  "faces": [
+                    {
+                      "box": {
+                        "x": 0.412,
+                        "y": 0.18,
+                        "w": 0.061,
+                        "h": 0.103
+                      },
+                      "detection_score": 0.83,
+                      "person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10",
+                      "name": "Jane Example",
+                      "confidence": 0.71,
+                      "distance": 0.29,
+                      "ambiguous": false
+                    },
+                    {
+                      "box": {
+                        "x": 0.702,
+                        "y": 0.22,
+                        "w": 0.055,
+                        "h": 0.094
+                      },
+                      "detection_score": 0.79,
+                      "person_id": null,
+                      "name": null,
+                      "confidence": null,
+                      "distance": null,
+                      "ambiguous": false
+                    }
+                  ],
+                  "image": {
+                    "w": 6000,
+                    "h": 4000
+                  },
+                  "model": "buffalo_l",
+                  "max_distance": 0.5,
+                  "immich_version": "3.4.1"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/people": {
+      "get": {
+        "operationId": "listPeople",
+        "summary": "Named, not hidden people of the library owner",
+        "responses": {
+          "200": {
+            "description": "People",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeopleResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "health",
+        "summary": "Liveness",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Process is up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "const": "ok"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "ready",
+        "summary": "Readiness: version pin, schema, grants, owner, ML reachable",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Ready"
+          },
+          "503": {
+            "description": "Not ready (reason in the service log)"
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "openapi",
+        "summary": "This document (FACE_API_ENABLE_OPENAPI)",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1 document"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Per-client API key; the server stores only its SHA-256."
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "integer"
+            },
+            "description": "On 429 and 503"
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "bad_request",
+                  "invalid_image",
+                  "unauthorized",
+                  "too_large",
+                  "rate_limited",
+                  "upstream",
+                  "not_ready",
+                  "busy",
+                  "not_found"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "Box": {
+        "type": "object",
+        "description": "Fractions (0-1) of the upright image; x,y = top-left corner",
+        "required": [
+          "x",
+          "y",
+          "w",
+          "h"
+        ],
+        "properties": {
+          "x": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "y": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "w": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "h": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      },
+      "Candidate": {
+        "type": "object",
+        "required": [
+          "person_id",
+          "name",
+          "confidence",
+          "distance",
+          "votes"
+        ],
+        "properties": {
+          "person_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confidence": {
+            "type": "number"
+          },
+          "distance": {
+            "type": "number"
+          },
+          "votes": {
+            "type": "integer",
+            "description": "neighbours of this person among the k nearest"
+          }
+        }
+      },
+      "Face": {
+        "type": "object",
+        "required": [
+          "box",
+          "detection_score",
+          "person_id",
+          "name",
+          "confidence",
+          "distance",
+          "ambiguous"
+        ],
+        "properties": {
+          "box": {
+            "$ref": "#/components/schemas/Box"
+          },
+          "detection_score": {
+            "type": "number"
+          },
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Immich person group id; null = no named match"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confidence": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "1 - distance; a hint, not a probability"
+          },
+          "distance": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "cosine distance of the nearest face of that person"
+          },
+          "ambiguous": {
+            "type": "boolean",
+            "description": "runner-up within FACE_API_AMBIGUITY_MARGIN"
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Candidate"
+            },
+            "description": "only with ?candidates=N"
+          }
+        }
+      },
+      "IdentifyResponse": {
+        "type": "object",
+        "required": [
+          "faces",
+          "image",
+          "model",
+          "max_distance",
+          "immich_version"
+        ],
+        "properties": {
+          "faces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Face"
+            }
+          },
+          "image": {
+            "type": "object",
+            "properties": {
+              "w": {
+                "type": "integer"
+              },
+              "h": {
+                "type": "integer"
+              }
+            }
+          },
+          "model": {
+            "type": "string"
+          },
+          "max_distance": {
+            "type": "number"
+          },
+          "immich_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "test_mode": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PeopleResponse": {
+        "type": "object",
+        "required": [
+          "people",
+          "count"
+        ],
+        "properties": {
+          "people": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "person_id",
+                "name",
+                "face_count"
+              ],
+              "properties": {
+                "person_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "face_count": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "count": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  }
+}

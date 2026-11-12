@@ -24,6 +24,8 @@ from .db import Database, SchemaMismatch
 from .imaging import ImageRejected, prepare
 from .matching import decide, normalise_box
 from .ml import MLClient, MLError
+from .openapi import OPENAPI_SPEC
+from .scrub import scrub_breadcrumb, scrub_event
 from .security import ApiKeys, RateLimiter
 
 log = logging.getLogger("immich_face_api")
@@ -58,22 +60,18 @@ def setup_sentry(settings: Settings) -> None:
         return
     import sentry_sdk
 
-    def scrub(event, _hint):
-        req = event.get("request")
-        if isinstance(req, dict):  # never send bodies, headers or query strings
-            for key in ("data", "headers", "cookies", "query_string", "env"):
-                req.pop(key, None)
-        return event
-
     sentry_sdk.init(
         dsn=settings.sentry_dsn,
         environment=settings.environment,
         release=f"immich-face-api@{__version__}",
         send_default_pii=False,
+        include_local_variables=False,
         max_request_body_size="never",
         traces_sample_rate=0.0,
-        before_send=scrub,
+        before_send=scrub_event,
+        before_breadcrumb=scrub_breadcrumb,
     )
+    sentry_sdk.set_tag("component", "immich-face-api")
 
 
 class HttpError(Exception):
@@ -255,6 +253,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def healthz():
         return {"status": "ok"}
 
+    @app.get("/openapi.json")
+    async def openapi_spec(request: Request):
+        if not request.app.state.face.s.enable_openapi:
+            return JSONResponse({"error": {"code": "not_found", "message": "not found"}}, status_code=404)
+        return JSONResponse(OPENAPI_SPEC)
+
     @app.get("/readyz")
     async def readyz(request: Request):
         state: State = request.app.state.face
@@ -311,7 +315,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 neighbours = await state.db.nearest([f.embedding for f in faces], include_unnamed=include_unnamed)
             except Exception as exc:  # noqa: BLE001
                 m.DB_ERRORS.inc()
-                log.warning("db error", extra={"fields": {"rid": request.state.rid, "error": type(exc).__name__}})
+                # unexpected: reported to Sentry/GlitchTip (scrubbed), unlike transient ML errors
+                log.error(
+                    "db error", exc_info=True, extra={"fields": {"rid": request.state.rid, "error": type(exc).__name__}}
+                )
                 raise HttpError(502, "upstream", "face search failed") from exc
             m.STAGE.labels("db").observe(time.perf_counter() - t2)
 
@@ -377,6 +384,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 rows = await state.db.people()
             except Exception as exc:  # noqa: BLE001
                 m.DB_ERRORS.inc()
+                log.error("db error", exc_info=True, extra={"fields": {"rid": request.state.rid}})
                 raise HttpError(502, "upstream", "people lookup failed") from exc
             request.state.fields = {"people": len(rows)}
             return {"people": rows, "count": len(rows)}

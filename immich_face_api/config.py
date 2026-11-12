@@ -126,6 +126,7 @@ class Settings:
     ml_timeout: float = 60.0
 
     enable_people: bool = True
+    enable_openapi: bool = True
     test_mode: bool = False
     metrics_port: int = 9090
     readiness_interval: int = 60
@@ -181,6 +182,7 @@ class Settings:
             ml_queue_timeout=_float("ML_QUEUE_TIMEOUT", 20.0, 0.1, 600.0),
             ml_timeout=_float("ML_TIMEOUT", 60.0, 1.0, 600.0),
             enable_people=_bool("ENABLE_PEOPLE", True),
+            enable_openapi=_bool("ENABLE_OPENAPI", True),
             test_mode=_bool("TEST_MODE", False),
             metrics_port=_int("METRICS_PORT", 9090, 0, 65535),
             readiness_interval=_int("READINESS_INTERVAL", 60, 5, 3600),

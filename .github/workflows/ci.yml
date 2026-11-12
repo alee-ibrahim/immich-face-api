@@ -2,14 +2,13 @@
 # run; pushed to GHCR only for pushes to this repository (never for pull requests from forks):
 #   ghcr.io/<owner>/immich-face-api:sha-<12 chars>   every pushed commit
 #   ghcr.io/<owner>/immich-face-api:main             the newest commit on main
-#   ghcr.io/<owner>/immich-face-api:<x.y.z>          a tag vX.Y.Z
+# Releases (tags vX.Y.Z: multi-arch, signed, SBOM) are built by release.yml.
 # Deployments should pin the digest printed in the job summary.
 name: ci
 
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -75,10 +74,6 @@ jobs:
           docker push "$img:sha-${{ steps.n.outputs.sha }}"
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then
             docker tag "$img:sha-${{ steps.n.outputs.sha }}" "$img:main"; docker push "$img:main"
-          fi
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            v="${GITHUB_REF#refs/tags/v}"
-            docker tag "$img:sha-${{ steps.n.outputs.sha }}" "$img:$v"; docker push "$img:$v"
           fi
           digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$img:sha-${{ steps.n.outputs.sha }}")"
           echo "### Image" >> "$GITHUB_STEP_SUMMARY"

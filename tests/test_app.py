@@ -165,7 +165,7 @@ async def test_no_cors_no_docs(settings):
         "/v1/identify", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "POST"}
     )
     assert r.status_code == 405 and "access-control-allow-origin" not in r.headers
-    for path in ("/docs", "/openapi.json", "/redoc", "/metrics"):
+    for path in ("/docs", "/redoc", "/metrics"):
         assert (await c.get(path)).status_code == 404
 
 
@@ -173,3 +173,16 @@ async def test_no_faces(settings):
     app, c = make(settings, faces=[], neighbours=[])
     r = await c.post("/v1/identify", headers=AUTH, content=synthetic_jpeg())
     assert r.status_code == 200 and r.json()["faces"] == []
+
+
+async def test_openapi_served_and_complete(settings):
+    app, c = make(settings)
+    r = await c.get("/openapi.json")
+    assert r.status_code == 200
+    spec = r.json()
+    assert spec["openapi"].startswith("3.1")
+    documented = {(path, method.upper()) for path, ops in spec["paths"].items() for method in ops}
+    served = {(route.path, m) for route in app.routes for m in getattr(route, "methods", set()) if m != "HEAD"}
+    assert served == documented
+    app, c = make(settings, enable_openapi=False)
+    assert (await c.get("/openapi.json")).status_code == 404
