@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Tests proving the API key is checked before the body is read and before any ML/DB call.
+
+### Changed
+- Docs: the API key is the authentication; a proxy allowlist or access token is optional hardening.
+
 ## [0.1.0] - not yet tagged
 
 First version, tested against **Immich 3.4.1**.

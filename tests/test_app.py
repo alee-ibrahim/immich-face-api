@@ -186,3 +186,27 @@ async def test_openapi_served_and_complete(settings):
     assert served == documented
     app, c = make(settings, enable_openapi=False)
     assert (await c.get("/openapi.json")).status_code == 404
+
+
+class ExplodingStream(httpx.AsyncByteStream):
+    """A request body that fails the test if anyone reads it."""
+
+    async def __aiter__(self):
+        raise AssertionError("request body was read before authentication")
+        yield b""  # pragma: no cover
+
+
+async def test_auth_before_body_ml_and_db(settings):
+    app, c = make(settings)
+    st = app.state.face
+    for headers in ({}, {"Authorization": "Bearer wrong-" + "z" * 40}):
+        r = await c.post(
+            "/v1/identify",
+            headers={**headers, "Content-Type": "image/jpeg", "Content-Length": str(100 * 1024 * 1024)},
+            content=ExplodingStream(),
+        )
+        assert r.status_code == 401
+    # an oversize body without a key is refused as unauthenticated, not as too large
+    r = await c.post("/v1/identify", content=b"\0" * (settings.max_upload_bytes + 1024 * 1024))
+    assert r.status_code == 401
+    assert st.ml.calls == [] and st.db.include_unnamed is None
