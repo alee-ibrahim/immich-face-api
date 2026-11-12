@@ -22,7 +22,7 @@ try:  # HEIC/HEIF support is optional at import time so unit tests run without i
 except ImportError:  # pragma: no cover
     HEIF_AVAILABLE = False
 
-ALLOWED_FORMATS = ("JPEG", "PNG", "WEBP", "HEIF")
+ALLOWED_FORMATS = ("JPEG", "MPO", "PNG", "WEBP", "HEIF")  # MPO = camera JPEG with extra frames
 _HEIF_BRANDS = {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1"}
 
 
@@ -68,7 +68,7 @@ def prepare(data: bytes, *, max_bytes: int, max_pixels: int, max_edge: int) -> P
     if kind == "HEIF" and not HEIF_AVAILABLE:  # pragma: no cover
         raise ImageRejected("HEIC is not supported by this build")
 
-    formats = ["HEIF"] if kind == "HEIF" else [kind]
+    formats = {"JPEG": ["JPEG", "MPO"], "HEIF": ["HEIF"]}.get(kind, [kind])
     with warnings.catch_warnings():
         warnings.simplefilter("error", Image.DecompressionBombWarning)
         try:
@@ -88,7 +88,7 @@ def prepare(data: bytes, *, max_bytes: int, max_pixels: int, max_edge: int) -> P
 
         try:
             if getattr(img, "n_frames", 1) > 1:
-                img.seek(0)  # animated WebP/PNG: first frame only
+                img.seek(0)  # animated WebP/PNG, MPO: first frame only
             img.load()
             upright = ImageOps.exif_transpose(img)
         except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:

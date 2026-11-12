@@ -100,6 +100,18 @@ def test_prepare_heic():
     assert (p.width, p.height, p.source_format) == (320, 240, "HEIF")
 
 
+def test_prepare_mpo_camera_jpeg():
+    # Many cameras write JPEGs with an embedded second picture (MPO); Pillow opens those as "MPO".
+    first = Image.new("RGB", (640, 480), (200, 40, 40))
+    second = Image.new("RGB", (160, 120), (40, 200, 40))
+    out = io.BytesIO()
+    first.save(out, format="MPO", save_all=True, append_images=[second])
+    data = out.getvalue()
+    assert sniff(data) == "JPEG" and Image.open(io.BytesIO(data)).format == "MPO"
+    p = prepare(data, **LIMITS)
+    assert (p.width, p.height, p.source_format) == (640, 480, "MPO")
+
+
 def test_prepare_png_with_alpha():
     p = prepare(synthetic("PNG", mode="RGBA"), **LIMITS)
     assert Image.open(io.BytesIO(p.jpeg)).mode == "RGB"
