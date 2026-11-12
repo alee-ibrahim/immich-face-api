@@ -12,8 +12,8 @@ import math
 from collections.abc import Callable, Sequence
 from html import escape
 
-W, H = 720, 200
-PAD_L, PAD_R, PAD_T, PAD_B = 44, 8, 10, 24
+W, H = 420, 190
+PAD_L, PAD_R, PAD_T, PAD_B = 46, 6, 10, 26
 
 
 def _nice_max(v: float) -> float:
@@ -47,9 +47,10 @@ def _frame(
         parts.append(
             f'<text class="tick" x="{PAD_L - 6}" y="{y + 4:.1f}" text-anchor="end">{escape(tick_fmt(y_max * frac))}</text>'
         )
-    every = max(1, math.ceil(n / 8))
+    every = max(1, math.ceil(n / 5))
     for i, label in enumerate(labels):
-        if i % every == 0 or i == n - 1:
+        last_regular = (n - 1) // every * every
+        if i % every == 0 or (i == n - 1 and n - 1 - last_regular >= max(2, every // 2 + 1)):
             x = PAD_L + step * (i + 0.5)
             parts.append(f'<text class="tick" x="{x:.1f}" y="{H - 6}" text-anchor="middle">{escape(label)}</text>')
     return parts, step
@@ -60,7 +61,7 @@ def bar_chart(labels: Sequence[str], values: Sequence[float], *, unit: str, titl
     parts, step = _frame(labels, y_max, title, _fmt_num)
     base = H - PAD_B
     plot_h = H - PAD_T - PAD_B
-    bar_w = max(1.0, min(step - 2, 24))  # 2px surface gap between bars
+    bar_w = max(1.0, min(step - 2, 18))  # 2px surface gap between bars
     for i, (label, v) in enumerate(zip(labels, values, strict=True)):
         x0 = PAD_L + step * i
         cx = x0 + step / 2

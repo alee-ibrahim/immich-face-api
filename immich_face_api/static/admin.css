@@ -28,9 +28,10 @@ main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 60px; }
 footer { max-width: 1200px; margin: 0 auto; padding: 0 16px 24px; color: var(--muted); font-size: 12px; }
 h1 { font-size: 20px; margin: 0 0 16px; }
 h2 { font-size: 15px; margin: 24px 0 10px; }
+.panel > h2:first-child { margin-top: 0; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
 .narrow { max-width: 440px; margin: 40px auto; }
-.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); margin-bottom: 12px; }
 .charts { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
 .stat .n { font-size: 24px; font-weight: 650; }
 .stat .l { color: var(--muted); font-size: 12px; }
@@ -75,7 +76,7 @@ details summary { cursor: pointer; color: var(--muted); }
 svg.chart { width: 100%; height: auto; display: block; }
 svg.chart .grid { stroke: var(--grid); stroke-width: 1; }
 svg.chart .axis { stroke: var(--line); stroke-width: 1; }
-svg.chart .tick { fill: var(--muted); font-size: 11px; }
+svg.chart .tick { fill: var(--muted); font-size: 13px; }
 svg.chart .bar { fill: var(--accent); }
 svg.chart .line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 svg.chart .dot { fill: var(--accent); }
