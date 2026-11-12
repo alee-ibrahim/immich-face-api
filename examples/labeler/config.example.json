@@ -1,0 +1,28 @@
+{
+  "immich_web_url": "https://photos.example.org",
+  "user_agent": "example-people-labeler/1.0 (contact: admin@example.org)",
+  "request_delay_seconds": 2,
+  "page_refresh_hours": 168,
+  "folders": [
+    {"root": "/mnt/photos/people/", "label": "people archive", "pattern": "(?P<name>[^/]+)/"},
+    {"root": "/mnt/photos/portraits/", "label": "staff portraits", "pattern": "\\d{4}/(?:\\d+\\s*[-.]\\s*)?(?P<name>[^/]+)/"}
+  ],
+  "names": {
+    "strip_patterns": ["^\\s*\\d+\\s*[-.):]*\\s*", "\\s*\\([^)]*\\)?\\s*$", "\\s+(?:retake|edited|copy)\\s*$"],
+    "exclude": ["new folder", "edited", "misc", "unsorted"],
+    "exclude_patterns": ["^\\d", "\\bfolder\\b"],
+    "homonym_detail": "team"
+  },
+  "web": [
+    {
+      "key": "team",
+      "label": "team page",
+      "pages": [
+        {"url": "https://www.example.org/en/team", "lang": "en"},
+        {"url": "https://www.example.org/fr/team", "lang": "fr"}
+      ],
+      "card_pattern": "<a href=\"/team/(?P<id>\\d+)\">\\s*<img src=\"(?P<image>[^\"]+)\"[^>]*>\\s*<h3>(?P<name>[^<]+)</h3>\\s*<p>(?P<team>[^<]*)</p>"
+    }
+  ],
+  "thresholds": {}
+}

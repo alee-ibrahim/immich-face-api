@@ -21,6 +21,10 @@ All notable changes to this project are documented here. The format follows
 - `X-API-Key` header accepted as an alternative to `Authorization: Bearer`.
 - Optional own PostgreSQL store (`FACE_API_STORE_URL`): UI-made keys (`ifa_<prefix>_<secret>`, SHA-256) accepted by
   the API next to the environment keys, and hourly usage aggregates (counts only), with retention.
+- People labeler (`python -m immich_face_api.labeler`): proposes names for unnamed people from person-named folders
+  (dominant identity, Immich's stored embeddings) and web listing pages (portraits embedded by Immich ML), with
+  confidence bands, merge candidates, an HTML/CSV review report, dry run by default, audited writes through the Immich
+  API with never-overwrite checks, and undo. Adds the `numpy` dependency.
 - Tests proving the API key is checked before the body is read and before any ML/DB call.
 
 ### Changed
