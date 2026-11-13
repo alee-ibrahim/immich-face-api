@@ -73,6 +73,9 @@ def test_compatible_and_homonym_keys():
     assert compatible("Rasheedh Ali", "Rasheed Ali")
     assert not compatible("Ali Rifau", "Abdulla Rifau")
     assert compatible("Adbul Sattar", "Abdul Sattar")  # one typo per word
+    assert not compatible("Abdul Salaam Ibrahim", "Abdulla Shazeem")  # short skeletons must match exactly
+    assert compatible("Mumthazim Ibrahim", "Munthazim Ibrahim")
+    assert not compatible("Liraaru Hameed", "Ahmed Didi")  # hmd vs ahmd: no tolerance for short skeletons
     assert compatible("Jane AbdulRahmaan", "Jane Abdul Rahman")  # joined words
     assert not compatible("Ali Riza", "Ali Rifau")
     assert compatible("Abdul Salaam Ibrahim", "Abdulsalaam Ibrahim")

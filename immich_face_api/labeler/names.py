@@ -91,11 +91,13 @@ def name_key(name: str) -> str:
 
 
 def _close(a: str, b: str) -> bool:
-    """Same token, or (both at least 3 letters) one typo apart: one letter added, dropped, changed or two swapped
-    ("Adbul" / "Abdul", "Salee" / "Saleem")."""
+    """Same token, or (both at least 4 consonant letters) one typo apart: one letter added, dropped, changed or two
+    swapped ("Adbul" / "Abdul", "Mumthazim" / "Munthazim"). Skeletons of 3 letters or fewer must match exactly: a
+    changed letter is a different name ("Shazeem" szm vs "Salaam" slm) and an added one too ("Hameed" hmd vs "Ahmed"
+    ahmd)."""
     if a == b:
         return True
-    if min(len(a), len(b)) < 3 or abs(len(a) - len(b)) > 1:
+    if min(len(a), len(b)) < 4 or abs(len(a) - len(b)) > 1:
         return False
     if len(a) == len(b):
         diff = [i for i in range(len(a)) if a[i] != b[i]]
