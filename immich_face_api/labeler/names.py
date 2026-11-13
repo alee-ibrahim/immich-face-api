@@ -140,6 +140,6 @@ def compatible(a: str, b: str) -> bool:
             if i == j == 0:
                 if _fits(short, long_):  # the words as written: one typo per word allowed
                     return True
-            elif short <= long_:  # words joined: exact (spelling-folded) match only
+            elif ta == tb:  # words joined: the same words exactly (spelling-folded), nothing absorbed
                 return True
     return False

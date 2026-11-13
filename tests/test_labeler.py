@@ -77,6 +77,7 @@ def test_compatible_and_homonym_keys():
     assert not compatible("Ali Riza", "Ali Rifau")
     assert compatible("Abdul Salaam Ibrahim", "Abdulsalaam Ibrahim")
     assert compatible("Abdul Ghani Abdul Hakeem", "Abdullganee Abdullhakeem")
+    assert not compatible("Saadha Ali", "Saudhullah Hilmy")  # a joined short name must not absorb a word
     assert not compatible("Ali Rifau", "Abdulla Rifau")
     assert clean_name("jane doe", RULES) == "Jane Doe" and clean_name("Jane doe", RULES) == "Jane Doe"
     assert clean_name("Jane McDoe", RULES) == "Jane McDoe"
