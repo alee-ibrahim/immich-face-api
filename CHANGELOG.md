@@ -24,7 +24,8 @@ All notable changes to this project are documented here. The format follows
 - People labeler (`python -m immich_face_api.labeler`): proposes names for unnamed people from person-named folders
   (dominant identity, Immich's stored embeddings) and web listing pages (portraits embedded by Immich ML), with
   confidence bands, merge candidates, an HTML/CSV review report, dry run by default, audited writes through the Immich
-  API with never-overwrite checks, and undo. Adds the `numpy` dependency.
+  API with never-overwrite checks, and undo; held proposals (name conflicts, ambiguous namesakes) are never written;
+  `share-names` copies the owner's names into still-empty shared copies (audited, undoable). Adds the `numpy` dependency.
 - Tests proving the API key is checked before the body is read and before any ML/DB call.
 
 ### Changed

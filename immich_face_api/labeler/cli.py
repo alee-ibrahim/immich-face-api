@@ -1,8 +1,9 @@
 """Command line: ``python -m immich_face_api.labeler <command>``.
 
-  run      build references, match the unnamed people, store proposals + report (dry run unless --apply-band high)
-  apply    write the names of a stored run's proposals (chosen bands, minus --exclude / only --only)
-  undo     revert names written by the labeler (a run, or single people), only where nobody changed them since
+  run          build references, match the unnamed people, store proposals + report (dry run unless --apply-band)
+  apply        write the names of a stored run's proposals (chosen bands, minus --exclude / only --only)
+  share-names  copy the owner's names into the still-empty copies of users the owner shares people with
+  undo         revert names written by the labeler (a run, or single people), only where nobody changed them since
   export   write a stored run's report.html and proposals.csv to a directory
   status   recent runs
 
@@ -23,9 +24,10 @@ import numpy as np
 
 from .folders import folder_references, overlap
 from .immich import ImmichAPI, ImmichDB, ImmichError
-from .match import build_identities, merge_candidates, propose
+from .match import build_identities, held, merge_candidates, propose
 from .report import proposals_csv, proposals_html
 from .settings import ConfigError, LabelerSettings
+from .share_names import NameWriter, share_names, undo_copies
 from .store import Store, new_run_id
 from .web import Embedder, Fetcher, web_references
 
@@ -64,6 +66,12 @@ def _write_names(ctx: Context, run_id: str, source_run: str | None, owner: str, 
             c["over_cap"] += 1
             continue
         pid = p["person_id"]
+        if held(p.get("evidence") or []):
+            ctx.store.audit_skip(
+                run_id, source_run, p, owner, "", "held: " + "; ".join(e for e in p["evidence"] if e.startswith("HOLD"))
+            )
+            c["skipped_held"] += 1
+            continue
         if ctx.store.ever_applied(pid):
             ctx.store.audit_skip(run_id, source_run, p, owner, "", "labeler named this person before")
             c["skipped_before"] += 1
@@ -73,7 +81,12 @@ def _write_names(ctx: Context, run_id: str, source_run: str | None, owner: str, 
             ctx.store.audit_skip(run_id, source_run, p, owner, named[0], "already named (by a user)")
             c["skipped_named"] += 1
             continue
-        cur = ctx.api.person(pid)
+        try:
+            cur = ctx.api.person(pid)
+        except ImmichError as exc:  # merged or deleted since the run
+            ctx.store.audit_skip(run_id, source_run, p, owner, "", f"person not readable now: {exc}")
+            c["skipped_gone"] += 1
+            continue
         if cur.get("name") or cur.get("isHidden"):
             ctx.store.audit_skip(run_id, source_run, p, owner, cur.get("name") or "", "named or hidden in Immich")
             c["skipped_named"] += 1
@@ -99,7 +112,8 @@ def cmd_run(s: LabelerSettings, args) -> int:
     run_id = new_run_id()
     ctx.store.start_run(run_id, "run")
     t0 = time.monotonic()
-    stats: dict = {"run_id": run_id, "mode": "apply high" if args.apply_band == "high" else "dry run"}
+    bands = [b for b in (args.apply_band or []) if b != "none"]
+    stats: dict = {"run_id": run_id, "mode": ("apply " + "+".join(bands)) if bands else "dry run"}
     notes: list[str] = []
     try:
         owner = ctx.owner()
@@ -195,8 +209,8 @@ def cmd_run(s: LabelerSettings, args) -> int:
                 for p in props
             ],
         )
-        if args.apply_band == "high":
-            todo = ctx.store.proposals(run_id, ["high"])
+        if bands:
+            todo = ctx.store.proposals(run_id, bands)
             res = _write_names(ctx, run_id, run_id, owner, todo)
             stats.update({f"apply_{k}": v for k, v in res.items()})
         stats["seconds"] = round(time.monotonic() - t0, 1)
@@ -239,18 +253,45 @@ def cmd_apply(s: LabelerSettings, args) -> int:
         ctx.close()
 
 
+def cmd_share_names(s: LabelerSettings, args) -> int:
+    ctx = Context(s, need_db=False)
+    writer = NameWriter(s)
+    run_id = new_run_id()
+    ctx.store.start_run(run_id, "share-names")
+    try:
+        owner = ctx.owner()
+        writer.check()
+        res = share_names(writer, ctx.store, run_id, owner, args.dry_run, s.max_copies)
+        stats = {"mode": "dry run" if args.dry_run else "write", **res}
+        ctx.store.finish_run(run_id, "ok", stats)
+        log.info("share-names %s: %s", run_id, stats)
+        return 0
+    except Exception as exc:
+        ctx.store.finish_run(run_id, "failed", {"error": f"{type(exc).__name__}: {exc}"})
+        raise
+    finally:
+        writer.close()
+        ctx.close()
+
+
 def cmd_undo(s: LabelerSettings, args) -> int:
     if not args.run and not args.person:
         raise ConfigError("undo needs --run or --person")
+    if args.copies:
+        return _undo_copies(s, args)
     ctx = Context(s, need_db=False)
     try:
         run_id = new_run_id()
         ctx.store.start_run(run_id, "undo")
         ctx.owner()
-        rows = ctx.store.applied(args.run, args.person)
+        rows = [r for run in (args.run or [None]) for r in ctx.store.applied(run, args.person)]
         c: Counter = Counter()
         for row in rows:
-            cur = ctx.api.person(row["person_id"])
+            try:
+                cur = ctx.api.person(row["person_id"])
+            except ImmichError:
+                c["gone"] += 1
+                continue
             if cur.get("name") != row["new_name"]:
                 c["changed_since"] += 1  # someone renamed it: leave it alone
                 continue
@@ -262,6 +303,26 @@ def cmd_undo(s: LabelerSettings, args) -> int:
         return 0
     finally:
         ctx.close()
+
+
+def _undo_copies(s: LabelerSettings, args) -> int:
+    """Revert copies made by share-names: of the given share-names runs, or of the given people. To roll back an
+    apply run completely, undo it first, then undo the copies of its people (``--copies --person ...``) or of the
+    share-names runs that followed it."""
+    store = Store(s)
+    writer = NameWriter(s)
+    run_id = new_run_id()
+    store.start_run(run_id, "undo-copies")
+    try:
+        writer.check()
+        rows = [r for run in (args.run or [None]) for r in store.applied(run, args.person, target="copy")]
+        c = undo_copies(writer, store, run_id, rows)
+        store.finish_run(run_id, "ok", {"run": args.run, "people": len(args.person or []), **c})
+        log.info("undo copies %s: %s", run_id, dict(c))
+        return 0
+    finally:
+        writer.close()
+        store.close()
 
 
 def cmd_export(s: LabelerSettings, args) -> int:
@@ -296,15 +357,18 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="python -m immich_face_api.labeler", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="command", required=True)
     r = sub.add_parser("run", help="propose names (dry run by default)")
-    r.add_argument("--apply-band", choices=["none", "high"], default="none", help="also write the high band")
+    r.add_argument("--apply-band", action="append", choices=["none", *BANDS], help="also write this band (repeatable)")
     a = sub.add_parser("apply", help="write the names of a stored run")
     a.add_argument("--run", required=True, help="run id, or 'latest'")
     a.add_argument("--band", action="append", choices=BANDS, required=True)
     a.add_argument("--exclude", nargs="*", default=[], help="person ids to leave out")
     a.add_argument("--only", nargs="*", default=[], help="only these person ids")
     u = sub.add_parser("undo", help="revert names the labeler wrote")
-    u.add_argument("--run", help="an apply/run id whose writes to revert")
+    u.add_argument("--run", nargs="*", help="apply/run (or share-names) run ids whose writes to revert")
     u.add_argument("--person", nargs="*", help="person ids to revert")
+    u.add_argument("--copies", action="store_true", help="revert share-names copies instead of the owner's names")
+    sn = sub.add_parser("share-names", help="copy owner names into empty shared copies")
+    sn.add_argument("--dry-run", action="store_true", help="count only, write nothing")
     e = sub.add_parser("export", help="write a stored report to a directory")
     e.add_argument("--run", default="latest")
     e.add_argument("--out", required=True)
@@ -319,9 +383,15 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         s = LabelerSettings.from_env()
-        return {"run": cmd_run, "apply": cmd_apply, "undo": cmd_undo, "export": cmd_export, "status": cmd_status}[
-            args.command
-        ](s, args)
+        commands = {
+            "run": cmd_run,
+            "apply": cmd_apply,
+            "share-names": cmd_share_names,
+            "undo": cmd_undo,
+            "export": cmd_export,
+            "status": cmd_status,
+        }
+        return commands[args.command](s, args)
     except (ConfigError, ImmichError, LookupError) as exc:
         log.error("%s", exc)
         return 2

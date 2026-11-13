@@ -498,8 +498,9 @@ the API: the API never writes; the labeler writes names only when told to, only 
 References whose centroids are close (or a bit less close with compatible names, for portraits taken years apart) are
 joined into one **identity**. Its name is the web spelling if there is one, otherwise the fullest folder name; other
 languages (e.g. a name in another script) are kept as `alt_names` for the report. Joined references whose names do not
-fit each other are a **name conflict**; different faces with the same name are **homonyms** (optionally a suggested
-name "Name (detail)" from a web card field, `names.homonym_detail`).
+fit each other are a **name conflict**; different faces with the same name are **homonyms**. Homonyms keep their plain
+name (tell them apart by person id; optionally a suggested "Name (detail)" from a web card field,
+`names.homonym_detail`); their evidence is never pooled, because identities are joined by face only.
 
 ### Matching and confidence
 
@@ -510,7 +511,7 @@ of the cluster's faces that are within Immich's `maxDistance` of the identity ("
 faces are in the reference folders, the references themselves. Bands:
 
 - **high**: distance <= 0.30, margin >= 0.12, consistency >= 0.8, cluster >= 3 faces, reference >= 2 photos, a name of
-  at least two words, and no conflict, homonym or ambiguous reference. Meant for automatic writing, once you allow it.
+  at least two words, and no conflict or ambiguous reference. Meant for automatic writing, once you allow it.
 - **medium**: distance <= 0.40 and margin >= 0.06, but some high gate failed (the report says which).
 - **low**: everything else up to 0.55. Review only.
 
@@ -518,12 +519,16 @@ All thresholds are in the config file (`thresholds`). Centroid distances are muc
 for one person's centroids from different sources expect about 0.15-0.35 (portraits ten years apart up to ~0.5),
 for different people above 0.6.
 
+**Held** proposals are never written by `apply` or `run --apply-band`, whatever their band: a name conflict between
+the sources, or a homonym whose runner-up is a namesake almost as close (the evidence does not point to one specific
+person). They carry a `HOLD:` line in the evidence and stay for manual review.
+
 **Merge candidates**: pairs of clusters with centroids within `merge_distance` (0.30), and clusters proposed for the
 same identity. Listed in the report only; the labeler never merges.
 
 ### Safety
 
-- `run` is a **dry run** unless `--apply-band high` is given. It stores proposals and a self-contained HTML report
+- `run` is a **dry run** unless `--apply-band <band>` is given (repeatable, e.g. `--apply-band high --apply-band medium`). It stores proposals and a self-contained HTML report
   (cluster thumbnails fetched through the API, inlined; no external requests) and a CSV in the state database.
 - A name is written only when, right before the write: no copy of the person (any user's row of the person group) has a
   name, the person is not hidden, and the labeler has never named this person before (so a name a human removed or
@@ -565,15 +570,24 @@ python -m immich_face_api.labeler export --run latest --out ./out
 python -m immich_face_api.labeler apply --run <run> --band high [--band medium] [--exclude <person-id> ...]
 python -m immich_face_api.labeler undo --run <apply-run>     # or --person <id> ...
 python -m immich_face_api.labeler run --apply-band high     # nightly, once you trust the high band
+python -m immich_face_api.labeler share-names [--dry-run]   # owner names into empty shared copies (below)
+python -m immich_face_api.labeler undo --copies --run <share-names-run>   # or --person <id> ...
 python -m immich_face_api.labeler status
 ```
 
 Suggested review flow: open the HTML report; for the medium band, note the person ids that are **wrong** and apply the
 band with `--exclude` for those (reviewers usually reject few); anything else, name directly in Immich.
 
-Note for Immich 3.4 people sharing: every user has their own row (and name) per person. A name written with the
-owner's key changes the owner's row only; users who already have a copy of that person keep their own (empty) name
-until Immich copies names again (it does so when a person is shared with them for the first time).
+### Shared copies (`share-names`)
+
+Immich 3.4 keeps one row (and name) per user and person. A name written with the owner's key changes the owner's row
+only; users who already have a copy keep their own, empty, name, because Immich copies the sharer's name only when a
+person is shared for the first time. `share-names` does that copy again: for every person the owner shares, a copy
+whose name is **empty** gets the owner's name, in one `UPDATE ... WHERE name = ''`; a copy with any name is never
+touched. It writes through the database (Immich has no API to write another user's copy), with its own narrow role:
+SELECT person ("ownerId", "personGroupId", name), person_user ("personGroupId", "sharedById", "sharedWithId"),
+version_history (version, "createdAt") and UPDATE person (name) only; same version pin and privilege check. Every copy
+is audited (`target = 'copy'`) and `undo --copies` reverts only copies still holding the copied name.
 
 ## Development
 

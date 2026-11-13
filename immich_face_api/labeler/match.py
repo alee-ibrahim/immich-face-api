@@ -221,6 +221,7 @@ class Proposal:
     score: float
     band: str  # high | medium | low
     why_not_high: list[str] = field(default_factory=list)
+    hold: list[str] = field(default_factory=list)  # reasons never to write this name automatically (any band)
 
     def evidence(self) -> list[str]:
         ev = []
@@ -240,8 +241,17 @@ class Proposal:
             ev.append("name conflict: " + "; ".join(self.identity.conflicts))
         if self.identity.homonym:
             hint = f"; suggested {self.identity.suggested_name!r}" if self.identity.suggested_name else ""
-            ev.append("another person has the same name" + hint)
+            ev.append("another person has the same name (told apart by face)" + hint)
+        ev.extend(HOLD_PREFIX + h for h in self.hold)
         return ev
+
+
+HOLD_PREFIX = "HOLD: "
+
+
+def held(evidence: list[str]) -> bool:
+    """True for a stored proposal that must not be written automatically."""
+    return any(e.startswith(HOLD_PREFIX) for e in evidence)
 
 
 def _clamp(x: float) -> float:
@@ -274,10 +284,11 @@ def propose(
         if d1 > t.match_max_distance:
             continue
         ident = identities[best]
-        d2, runner = 1.0 + d1, None
+        d2, runner, runner_ident = 1.0 + d1, None, None
         if len(order) > 1:  # every other identity is another person (same-name people included)
             j = int(order[1])
-            d2, runner = float(dist[ci, j]), identities[j].proposed_name
+            runner_ident = identities[j]
+            d2, runner = float(dist[ci, j]), runner_ident.proposed_name
         margin = min(1.0, d2 - d1)
         cons = None
         if c.person_id in samples and len(samples[c.person_id]):
@@ -291,7 +302,7 @@ def propose(
             score += 0.05
         if in_refs >= 2:
             score += 0.05
-        if ident.conflicts or ident.homonym or ident.ambiguous or ident.loose:
+        if ident.conflicts or ident.ambiguous or ident.loose:
             score -= 0.2
 
         why = []
@@ -309,12 +320,16 @@ def propose(
             why.append(f"reference has {ident.n_photos} photo(s) < {t.high_min_reference_faces}")
         if ident.conflicts:
             why.append("name conflict between sources")
-        if ident.homonym:
-            why.append("same name as another person (needs a distinguishing name)")
         if ident.ambiguous:
             why.append("ambiguous reference folder")
         if ident.loose:
             why.append("joined references are not all close")
+        hold = []
+        if ident.conflicts:
+            hold.append("the sources disagree on the name (" + "; ".join(ident.conflicts) + ")")
+        namesake = runner_ident is not None and name_key(runner_ident.name) == name_key(ident.name)
+        if ident.homonym and namesake and margin < t.high_min_margin:
+            hold.append("a namesake is about as close: the evidence does not point to one specific person")
         if not why:
             band = "high"
         elif d1 <= t.medium_max_distance and margin >= t.medium_min_margin:
@@ -334,6 +349,7 @@ def propose(
                 score=round(_clamp(score), 3),
                 band=band,
                 why_not_high=why,
+                hold=hold,
             )
         )
     rank = {"high": 0, "medium": 1, "low": 2}

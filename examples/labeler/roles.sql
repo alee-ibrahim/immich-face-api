@@ -14,3 +14,12 @@ GRANT SELECT (id, "ownerId", "deletedAt", "originalPath") ON TABLE asset TO immi
 
 -- 2. Its own state database (runs, proposals, audit log, caches): owned by the labeler, separate from Immich
 CREATE DATABASE immich_labeler OWNER immich_labeler;
+
+-- 3. Optional, for `share-names` only: a SEPARATE role (keep the one above read-only). Set
+--    LABELER_DB_USER/PASSWORD to it for that command and LABELER_STATE_DB_USER/PASSWORD to immich_labeler.
+CREATE ROLE immich_name_copy LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION CONNECTION LIMIT 2;
+GRANT CONNECT ON DATABASE immich TO immich_name_copy;
+GRANT USAGE ON SCHEMA public TO immich_name_copy;
+GRANT SELECT ("ownerId", "personGroupId", name), UPDATE (name) ON TABLE person TO immich_name_copy;
+GRANT SELECT ("personGroupId", "sharedById", "sharedWithId") ON TABLE person_user TO immich_name_copy;
+GRANT SELECT (version, "createdAt") ON TABLE version_history TO immich_name_copy;

@@ -344,5 +344,110 @@ def test_undo_only_reverts_unchanged_names(monkeypatch):
             pass
 
     monkeypatch.setattr(cli, "Context", Ctx)
-    assert cli.cmd_undo(SimpleNamespace(), SimpleNamespace(run="r1", person=None)) == 0
+    assert cli.cmd_undo(SimpleNamespace(), SimpleNamespace(run=["r1"], person=None, copies=False)) == 0
     assert api.writes == [("A", "")] and undone == [1] and people["B"]["name"] == "Changed By Curator"
+
+
+def test_write_names_skips_held_and_vanished_people():
+    from immich_face_api.labeler.immich import ImmichError
+
+    class API(FakeAPI):
+        def person(self, pid):
+            if pid == "G":
+                raise ImmichError("GET /api/people/G: HTTP 404")
+            return super().person(pid)
+
+    people = {k: {"name": "", "isHidden": False} for k in "AH"}
+    ctx = SimpleNamespace(s=SimpleNamespace(max_apply=10), store=FakeStore(), api=API(people), db=FakeDB({}))
+    props = [
+        {"person_id": "H", "name": "Name H", "evidence": ["x", "HOLD: the sources disagree on the name"]},
+        {"person_id": "G", "name": "Name G", "evidence": []},
+        {"person_id": "A", "name": "Name A", "evidence": ["x"]},
+    ]
+    res = cli._write_names(ctx, "r1", "r0", "owner", props)
+    assert ctx.api.writes == [("A", "Name A")]
+    assert res == Counter(applied=1, skipped_held=1, skipped_gone=1)
+
+
+def test_namesake_about_as_close_is_held_and_conflicts_are_held():
+    from immich_face_api.labeler.match import held
+
+    a, b = person(), person()
+    both = normalise(a + b)  # a cluster halfway between two namesakes
+    ids = build_identities(
+        [ref("web:s:1", "web", "Mohamed Rasheed", a, 1), ref("web:s:2", "web", "Mohamed Rasheed", b, 1)], T
+    )
+    assert all(i.homonym for i in ids) and all(i.proposed_name == "Mohamed Rasheed" for i in ids)  # plain names
+    t = Thresholds(match_max_distance=0.9)
+    (p,) = propose([Cluster("X", 5, both)], ids, t, {}, {})
+    assert held(p.evidence()) and any("namesake" in h for h in p.hold)
+    # a clear match to one of two namesakes is not held
+    fa = np.stack([face_of(a) for _ in range(6)])
+    (q,) = propose([Cluster("Y", 6, normalise(fa.mean(0)))], ids, T, {"Y": fa}, {})
+    assert not q.hold and q.band == "medium"  # single portrait: reference has 1 photo < 2
+    ids2 = build_identities(
+        [ref("folder:1", "folder", "Ali Rifau", a), ref("web:s:1", "web", "Abdulla Rifau", a, 1)], T
+    )
+    (r,) = propose([Cluster("Z", 6, normalise(fa.mean(0)))], ids2, T, {"Z": fa}, {})
+    assert held(r.evidence())
+
+
+class FakeWriter:
+    def __init__(self, rows, names):
+        self.rows, self.names = rows, names  # names: (user, group) -> current name of the copy
+
+    def candidates(self, owner):
+        return [r for r in self.rows if self.names[(r[1], r[0])] == ""]
+
+    def copy(self, owner, user, group, name):
+        if self.names[(user, group)] != "":
+            return False
+        self.names[(user, group)] = name
+        return True
+
+    def revert(self, user, group, new, old):
+        if self.names[(user, group)] != new:
+            return False
+        self.names[(user, group)] = old
+        return True
+
+
+class CopyStore:
+    def __init__(self):
+        self.rows, self.undone = [], []
+
+    def copy_pending(self, run, group, user, name):
+        self.rows.append(
+            {
+                "id": len(self.rows),
+                "person_id": group,
+                "owner_id": user,
+                "old_name": "",
+                "new_name": name,
+                "status": "pending",
+            }
+        )
+        return len(self.rows) - 1
+
+    def audit_set(self, i, status, note=None):
+        self.rows[i]["status"] = status
+
+    def audit_undone(self, i, run):
+        self.undone.append(i)
+
+
+def test_share_names_fills_only_empty_copies_and_undo_reverts_only_unchanged():
+    from immich_face_api.labeler.share_names import share_names, undo_copies
+
+    names = {("u1", "g1"): "", ("u2", "g1"): "Curator Name", ("u1", "g2"): ""}
+    w = FakeWriter([("g1", "u1", "Jane Doe"), ("g1", "u2", "Jane Doe"), ("g2", "u1", "John Roe")], names)
+    st = CopyStore()
+    assert share_names(w, st, "r", "owner", True, 100) == Counter(candidates=2, would_copy=2)
+    assert names[("u1", "g1")] == ""  # dry run wrote nothing
+    res = share_names(w, st, "r", "owner", False, 100)
+    assert res == Counter(candidates=2, copied=2)
+    assert names == {("u1", "g1"): "Jane Doe", ("u2", "g1"): "Curator Name", ("u1", "g2"): "John Roe"}
+    names[("u1", "g2")] = "Renamed By Curator"
+    applied = [r for r in st.rows if r["status"] == "applied"]
+    assert undo_copies(w, st, "u", applied) == Counter(undone=1, changed_since=1)
+    assert names[("u1", "g1")] == "" and names[("u1", "g2")] == "Renamed By Curator"

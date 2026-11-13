@@ -57,6 +57,9 @@ CREATE TABLE IF NOT EXISTS labeler_audit (
   undone_at timestamptz,
   undo_run_id text
 );
+-- target: 'owner' = the owner's person row (written through the Immich API), 'copy' = another user's copy of a
+-- shared person (share-names; owner_id is then that user)
+ALTER TABLE labeler_audit ADD COLUMN IF NOT EXISTS target text NOT NULL DEFAULT 'owner';
 CREATE INDEX IF NOT EXISTS labeler_audit_person ON labeler_audit (person_id);
 CREATE INDEX IF NOT EXISTS labeler_audit_run ON labeler_audit (run_id);
 CREATE TABLE IF NOT EXISTS labeler_http_cache (
@@ -230,9 +233,21 @@ class Store:
             (undo_run, audit_id),
         )
 
-    def applied(self, run_id: str | None, person_ids: list[str] | None) -> list[dict]:
-        q = "SELECT id, run_id, person_id::text, old_name, new_name FROM labeler_audit WHERE status = 'applied'"
-        args: list = []
+    def copy_pending(self, run_id: str, person_id: str, user_id: str, name: str) -> int:
+        row = self.conn.execute(
+            """INSERT INTO labeler_audit (run_id, person_id, owner_id, old_name, new_name, status, target, note)
+               VALUES (%s, %s, %s, '', %s, 'pending', 'copy', 'owner name copied into an empty shared copy')
+               RETURNING id""",
+            (run_id, person_id, user_id, name),
+        ).fetchone()
+        return row[0]
+
+    def applied(self, run_id: str | None, person_ids: list[str] | None, target: str = "owner") -> list[dict]:
+        q = (
+            "SELECT id, run_id, person_id::text, owner_id::text, old_name, new_name FROM labeler_audit "
+            "WHERE status = 'applied' AND target = %s"
+        )
+        args: list = [target]
         if run_id:
             q += " AND run_id = %s"
             args.append(run_id)
@@ -246,7 +261,8 @@ class Store:
     def ever_applied(self, person_id: str) -> bool:
         return bool(
             self.conn.execute(
-                "SELECT 1 FROM labeler_audit WHERE person_id = %s AND status IN ('applied', 'undone') LIMIT 1",
+                "SELECT 1 FROM labeler_audit WHERE person_id = %s AND target = 'owner' "
+                "AND status IN ('applied', 'undone') LIMIT 1",
                 (person_id,),
             ).fetchone()
         )
