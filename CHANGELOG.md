@@ -5,6 +5,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The image sent to the ML server is now lossless PNG instead of a JPEG at quality 92. Re-encoding moved the
+  detector's score by up to about 0.006, which dropped faces that sit right at `minScore` (a real frame scored 0.7007
+  from the original and 0.6994 after the re-encode, so it was missed at 0.7). Images are still never upscaled.
+
 ### Added
 - Optional admin UI (`python -m immich_face_api admin`, port 8081): dashboard and per-app usage (requests, faces,
   match and unknown rate, latency p50/p95, errors over time), apps and API keys (shown once, owner, label, rate limit

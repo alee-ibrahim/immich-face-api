@@ -57,7 +57,7 @@ For each request:
 1. **Validate in memory:** API key, rate limit, body size (default 15 MB), magic bytes (JPEG, PNG, WebP, HEIC/HEIF;
    camera JPEGs with an embedded preview, "MPO", count as JPEG), header-only open with that one decoder, pixel limit
    (default 50 MP) **before** decoding.
-2. **Normalise:** apply EXIF orientation, create a **new** RGB JPEG without any metadata (EXIF, GPS, XMP, ICC dropped),
+2. **Normalise:** apply EXIF orientation, create a **new** RGB image without any metadata (EXIF, GPS, XMP, ICC dropped), sent to ML losslessly as PNG,
    longest edge 1440 px (Immich's preview size; Immich detects faces on its preview, so this keeps embeddings comparable).
 3. **Detect + embed:** `POST /predict` to Immich's ML server with exactly the request Immich makes:
    `{"facial-recognition": {"detection": {"modelName": M, "options": {"minScore": S}}, "recognition": {"modelName": M}}}`.

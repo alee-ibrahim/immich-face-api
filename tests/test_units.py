@@ -91,7 +91,7 @@ def test_sniff():
 def test_prepare_formats(fmt):
     p = prepare(synthetic(fmt), **LIMITS)
     assert (p.width, p.height) == (320, 240)
-    assert Image.open(io.BytesIO(p.jpeg)).format == "JPEG"
+    assert Image.open(io.BytesIO(p.encoded)).format == "PNG"
 
 
 def test_prepare_heic():
@@ -114,7 +114,7 @@ def test_prepare_mpo_camera_jpeg():
 
 def test_prepare_png_with_alpha():
     p = prepare(synthetic("PNG", mode="RGBA"), **LIMITS)
-    assert Image.open(io.BytesIO(p.jpeg)).mode == "RGB"
+    assert Image.open(io.BytesIO(p.encoded)).mode == "RGB"
 
 
 def test_orientation_applied_and_metadata_stripped():
@@ -122,7 +122,7 @@ def test_orientation_applied_and_metadata_stripped():
     assert Image.open(io.BytesIO(data)).getexif()
     p = prepare(data, **LIMITS)
     assert (p.width, p.height) == (600, 800)
-    out = Image.open(io.BytesIO(p.jpeg))
+    out = Image.open(io.BytesIO(p.encoded))
     assert out.size == (600, 800)
     assert not out.getexif()
     assert "exif" not in out.info and "icc_profile" not in out.info
@@ -250,3 +250,20 @@ def test_inline_code_filter_escapes():
     from immich_face_api.admin import inline_code
 
     assert str(inline_code("use `X-API-Key` <b>")) == "use <code>X-API-Key</code> &lt;b&gt;"
+
+
+def test_ml_input_is_lossless_and_metadata_free():
+    """The bytes sent to the ML server must carry exactly the decoded, upright pixels (lossy re-encoding moved a
+    borderline face below minScore in production), and no metadata."""
+    src = Image.effect_noise((640, 360), 64).convert("RGB")  # high-frequency content: any lossy step would change it
+    exif = Image.Exif()
+    exif[0x010F] = "TestCam"
+    buf = io.BytesIO()
+    src.save(buf, format="JPEG", quality=90, exif=exif.tobytes())
+    data = buf.getvalue()
+    p = prepare(data, **LIMITS)
+    sent = Image.open(io.BytesIO(p.encoded))
+    assert sent.format == "PNG" and not sent.getexif() and "exif" not in sent.info and "icc_profile" not in sent.info
+    decoded = Image.open(io.BytesIO(data)).convert("RGB")
+    assert sent.convert("RGB").tobytes() == decoded.tobytes()  # pixel-identical, no resize below max_edge
+    assert (p.sent_width, p.sent_height) == (640, 360)  # never upscaled

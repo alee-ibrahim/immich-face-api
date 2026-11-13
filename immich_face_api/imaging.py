@@ -2,7 +2,7 @@
 
 Order matters: magic bytes first (cheap, before any decoder runs), then the header-only open with an
 explicit format allowlist, the pixel limit (before decoding pixels: decompression bombs), and only then
-the full decode. The output is a fresh RGB JPEG without any metadata (EXIF, GPS, XMP, ICC are dropped),
+the full decode. The output is a fresh RGB **PNG** (lossless) without any metadata (EXIF, GPS, XMP, ICC are dropped),
 rotated upright according to its EXIF orientation, with its longest edge at most ``max_edge``.
 """
 
@@ -36,7 +36,7 @@ class ImageRejected(ValueError):
 
 @dataclass(frozen=True)
 class PreparedImage:
-    jpeg: bytes  # what is sent to the ML server
+    encoded: bytes  # what is sent to the ML server: lossless PNG of exactly the pixels below
     width: int  # upright size of the original
     height: int
     sent_width: int  # size of the image sent to ML (boxes are relative to it)
@@ -115,9 +115,12 @@ def prepare(data: bytes, *, max_bytes: int, max_pixels: int, max_edge: int) -> P
     # A new image object carries no info dict: nothing of the original metadata is written.
     clean = Image.new("RGB", sent.size)
     clean.paste(sent)
-    clean.save(out, format="JPEG", quality=92, optimize=False)
+    # Lossless on purpose: a lossy re-encode shifts the detector's score by up to about 0.006, enough to drop a face
+    # that sits at the minScore threshold (a JPEG at q92 turned a 0.7007 face into 0.6994 and missed it at 0.7).
+    # compress_level 1: fast; size does not matter on the way to the ML server.
+    clean.save(out, format="PNG", compress_level=1)
     return PreparedImage(
-        jpeg=out.getvalue(),
+        encoded=out.getvalue(),
         width=width,
         height=height,
         sent_width=clean.width,
