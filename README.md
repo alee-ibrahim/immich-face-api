@@ -134,6 +134,7 @@ over the plain variable.
 | `FACE_API_FACE_CACHE_REFRESH_SECONDS` | `300` | how often to check named faces for changes |
 | `FACE_API_MAX_CANDIDATES` | `5` | cap for `?candidates=` |
 | `FACE_API_AMBIGUITY_MARGIN` | `0.03` | runner-up this close → `ambiguous: true` |
+| `FACE_API_SAME_NAME_MAX_DISTANCE` | `0.6` | same-name people with centroids this close are one split person, not an ambiguity; `0` = off |
 | `FACE_API_ENABLE_PEOPLE` | `true` | `GET /v1/people` |
 | `FACE_API_ENABLE_OPENAPI` | `true` | `GET /openapi.json` (keep it internal) |
 | `FACE_API_TEST_MODE` | `false` | allows `include_unnamed=1`. **Never in production** |
@@ -438,7 +439,18 @@ For each detected face:
 2. Drop neighbours farther than **`max_distance`** (0.5).
 3. Group by person. A person's score is their **best (smallest) distance**; ties go to the person with more neighbours.
 4. The best person is the match; the following ones are the candidates. If the runner-up is within
-   `ambiguity_margin` (0.03), `ambiguous` is `true`.
+   `ambiguity_margin` (0.03), `ambiguous` is `true`. The runner-up here is the first candidate that is **another
+   person**: see split people below.
+
+**Split people and namesakes.** One person often has several Immich people (clusters) with the same name, for example
+clusters named one by one before anyone merged them. Two such candidates are not a choice, so they do not make a face
+ambiguous. Two candidates count as **the same person** when their names are equal after normalisation (Unicode NFKC,
+case-folded, punctuation and spaces collapsed) **and** the centroids of their cached faces are within
+`same_name_max_distance` (0.6, cosine). People who only share a name (namesakes: different faces, centroids typically
+0.8–1.1 apart) stay separate, so a face that sits between two namesakes is still `ambiguous`. The rule needs the face
+cache (centroids); without it (cache still loading, test mode) same-name candidates count as different people. The
+candidates list is not changed: both clusters are still listed, with their own `person_id`. Merging the clusters in
+Immich removes the duplicate for good.
 
 **Why "nearest face wins" and not a vote?** Immich itself assigns a new face to the person of its nearest matching face,
 so the API agrees with what curators see in Immich. A majority vote over the k neighbours favours people with many

@@ -24,7 +24,7 @@ from . import __version__
 from . import metrics as m
 from .config import Settings
 from .db import Database, SchemaMismatch
-from .facecache import FaceCache
+from .facecache import FaceCache, same_person_rule
 from .imaging import ImageRejected, prepare
 from .matching import decide, normalise_box
 from .ml import MLClient, MLError
@@ -231,8 +231,10 @@ class State:
         t2 = time.perf_counter()
         embeddings = [f.embedding for f in faces]
         try:
+            same_person = None
             if state.faces is not None and state.faces.ready and not include_unnamed:
                 neighbours = await state.faces.nearest(embeddings)  # in memory, milliseconds
+                same_person = same_person_rule(state.faces.snap, s.same_name_max_distance)
             else:  # cache not loaded yet, or test mode: exact search in the database
                 neighbours = await state.db.nearest(embeddings, include_unnamed=include_unnamed)
         except Exception as exc:  # noqa: BLE001
@@ -246,6 +248,7 @@ class State:
                 max_distance=s.max_distance,
                 max_candidates=s.max_candidates,
                 ambiguity_margin=s.ambiguity_margin,
+                same_person=same_person,
             )
             best = d.best
             entry = {

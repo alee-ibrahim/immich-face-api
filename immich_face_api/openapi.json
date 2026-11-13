@@ -445,7 +445,7 @@
           },
           "ambiguous": {
             "type": "boolean",
-            "description": "runner-up within FACE_API_AMBIGUITY_MARGIN"
+            "description": "another person (not a same-name cluster of the same person, see FACE_API_SAME_NAME_MAX_DISTANCE) is within FACE_API_AMBIGUITY_MARGIN"
           },
           "candidates": {
             "type": "array",
