@@ -291,7 +291,7 @@ milliseconds per face, in a worker thread.
 | `FACE_API_LOG_MAX_FACES` | `50` | faces logged and cropped per request |
 | `FACE_API_NEAR_MARGIN` | `0.05` | a match this close to `FACE_API_MAX_DISTANCE` counts as "near" |
 | `FACE_API_IMMICH_URL` | | Immich web URL for person links, e.g. `https://photos.example.org` |
-| `FACE_API_SIMILAR_PROBES` | `0` | `vchordrq.probes` for "find similar" (0: the database default) |
+| `FACE_API_SIMILAR_PROBES` | `32` | `vchordrq.probes` for "find similar" (Immich's face index needs probes set per query; 0: leave the database default) |
 
 ## API
 

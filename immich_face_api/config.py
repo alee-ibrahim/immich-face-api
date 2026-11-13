@@ -176,7 +176,7 @@ class Settings:
     log_max_faces: int = 50  # faces logged (and cropped) per request at most
     near_margin: float = 0.05  # a match within this of max_distance counts as "near the threshold"
     immich_url: str = ""  # Immich web URL for person links in the admin UI, e.g. https://photos.example.org
-    similar_probes: int = 0  # vchordrq.probes for "find similar in Immich" (0: the database default)
+    similar_probes: int = 32  # vchordrq.probes for "find similar in Immich" (0: the database default)
 
     @property
     def oidc_enabled(self) -> bool:
@@ -270,5 +270,5 @@ class Settings:
             log_max_faces=_int("LOG_MAX_FACES", 50, 1, 500),
             near_margin=_float("NEAR_MARGIN", 0.05, 0.0, 1.0),
             immich_url=(_env("IMMICH_URL", "") or "").rstrip("/"),
-            similar_probes=_int("SIMILAR_PROBES", 0, 0, 100_000),
+            similar_probes=_int("SIMILAR_PROBES", 32, 0, 100_000),
         )
