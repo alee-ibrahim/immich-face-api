@@ -128,6 +128,9 @@ over the plain variable.
 | `FACE_API_MAX_UPLOAD_BYTES` | `15728640` | 15 MiB |
 | `FACE_API_MAX_PIXELS` | `50000000` | checked before decoding |
 | `FACE_API_KNN` | `20` | neighbours per face |
+| `FACE_API_FACE_CACHE` | `true` | search named faces in memory (see [Matching](#the-matching-algorithm)) |
+| `FACE_API_FACE_CACHE_PER_PERSON` | `100` | faces cached per person |
+| `FACE_API_FACE_CACHE_REFRESH_SECONDS` | `300` | how often to check named faces for changes |
 | `FACE_API_MAX_CANDIDATES` | `5` | cap for `?candidates=` |
 | `FACE_API_AMBIGUITY_MARGIN` | `0.03` | runner-up this close → `ambiguous: true` |
 | `FACE_API_ENABLE_PEOPLE` | `true` | `GET /v1/people` |
@@ -369,10 +372,27 @@ so the API agrees with what curators see in Immich. A majority vote over the k n
 photos (someone who appears in thousands of photos fills the k slots even when another person is closer) and misses
 people who were named only recently, with a handful of faces. The `votes` count is still returned as extra evidence.
 
-**Why exact search?** Immich's `face_index` (VectorChord `vchordrq`) is an approximate index that is searched before the
-"named, this owner" filter is applied; for such a selective filter it can return too few rows or none. The named faces
-are a small part of a library, so an exact scan is fast (about 20 ms per 1,000 named faces per detected face on a small
-server) and always correct.
+**Why not Immich's vector index, and why in memory?** Immich's `face_index` (VectorChord `vchordrq`) is an approximate
+index that is searched before the "named, this owner" filter is applied. For such a selective filter it can return too
+few rows, or none. An exact scan in SQL is correct but reads every named face's embedding from PostgreSQL, about
+**4.4 s per detected face at 55,000 named faces**, so group photos ran into the statement timeout.
+
+So named faces are searched **in memory**. Each process loads the owner's named, not hidden people's embeddings into a
+float16 matrix and searches it with one matrix product (numpy):
+
+- **Cap per person:** at most `FACE_API_FACE_CACHE_PER_PERSON` faces per person (default 100), a stable pseudo-random
+  sample of the person's faces. Most people have fewer and are cached completely.
+- **Refresh:** every `FACE_API_FACE_CACHE_REFRESH_SECONDS` (300) a cheap check (count and newest change of named people
+  and faces) runs. The matrix is rebuilt only when something changed, so a newly named person is found within about
+  5 minutes.
+- **Cost:** about 1 KiB per cached face per process. A real library with 641 named people and 56,663 named faces caches
+  23,152 faces (about 23 MiB). Ten detected faces against 30,000 cached faces take about 40 ms; against 300,000 cached
+  faces (294 MiB) about 0.4 s.
+- **Trade-off:** "nearest face wins" is kept, over the cached faces. For people with more faces than the cap, the
+  nearest face can be one outside the sample. A sample of up to 100 faces of the same person almost always holds one
+  about as close.
+- **Fallback:** until the first load finishes, and in test mode, the exact SQL search is used. Database timeouts become
+  `503 busy` with `Retry-After`. `FACE_API_FACE_CACHE=false` always uses SQL (small libraries only).
 
 **Thresholds.** `distance` is the same measure Immich uses for clustering. 0.5 matches Immich's default; a lower value
 (0.4–0.45) gives fewer but safer suggestions, which is usually right when a wrong public name is worse than none.
@@ -475,8 +495,7 @@ your server.
 
 - Pinned to specific Immich versions (see above); internal schema changes need a new release.
 - One library owner per instance.
-- Exact search scales to some tens of thousands of named faces; beyond that an index with pre-filtering or an in-memory
-  cache would be needed.
+- The in-memory face cache costs about 1 KiB per cached face per process (default cap: 100 faces per person).
 - Rate limits are per replica (in memory), not global.
 - Face recognition is not perfect: twins, children growing up, masks, profile views and tiny or blurred faces cause
   misses and wrong suggestions. Always keep a human in the loop.

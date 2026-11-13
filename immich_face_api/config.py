@@ -110,6 +110,9 @@ class Settings:
 
     # matching
     knn: int = 20
+    face_cache: bool = True
+    face_cache_per_person: int = 100
+    face_cache_refresh_seconds: int = 300
     max_candidates: int = 5
     ambiguity_margin: float = 0.03
 
@@ -201,6 +204,9 @@ class Settings:
             owner_email=owner_email,
             expected_immich_version=_env("EXPECTED_IMMICH_VERSION", "3.4.1").lstrip("v"),
             knn=_int("KNN", 20, 1, 200),
+            face_cache=_bool("FACE_CACHE", True),
+            face_cache_per_person=_int("FACE_CACHE_PER_PERSON", 100, 1, 100_000),
+            face_cache_refresh_seconds=_int("FACE_CACHE_REFRESH_SECONDS", 300, 10, 86_400),
             max_candidates=_int("MAX_CANDIDATES", 5, 1, 20),
             ambiguity_margin=_float("AMBIGUITY_MARGIN", 0.03, 0.0, 0.5),
             max_upload_bytes=_int("MAX_UPLOAD_BYTES", 15 * 1024 * 1024, 1024, 100 * 1024 * 1024),

@@ -31,6 +31,7 @@ EXPECTED_COLUMNS: dict[tuple[str, str], str] = {
     ("person", "ownerId"): "uuid",
     ("person", "name"): "character varying",
     ("person", "isHidden"): "boolean",
+    ("person", "updatedAt"): "timestamp with time zone",
     ("asset_face", "id"): "uuid",
     ("asset_face", "personGroupId"): "uuid",
     ("asset_face", "ownerId"): "uuid",
@@ -38,6 +39,7 @@ EXPECTED_COLUMNS: dict[tuple[str, str], str] = {
     ("asset_face", "isVisible"): "boolean",
     ("asset_face", "assetDeletedAt"): "timestamp with time zone",
     ("asset_face", "assetVisibility"): "asset_visibility_enum",
+    ("asset_face", "updatedAt"): "timestamp with time zone",
     ("face_search", "faceId"): "uuid",
     ("face_search", "embedding"): "vector(512)",
     ("version_history", "version"): "character varying",
@@ -82,6 +84,31 @@ LEFT JOIN asset_face af ON af."personGroupId" = p."personGroupId" AND af."ownerI
 WHERE p."ownerId" = %(owner)s AND p.name <> '' AND NOT p."isHidden"
 GROUP BY p."personGroupId", p.name
 ORDER BY p.name, p."personGroupId"
+"""
+)
+
+
+_SIGNATURE_SQL = (
+    """
+SELECT count(*), max(p."updatedAt"), max(af."updatedAt")
+FROM person p
+JOIN asset_face af ON af."personGroupId" = p."personGroupId" AND af."ownerId" = p."ownerId"
+WHERE p."ownerId" = %(owner)s AND p.name <> '' AND NOT p."isHidden" AND"""
+    + _FACE_FILTER
+)
+
+_NAMED_FACES_SQL = (
+    """
+SELECT person_id, name, embedding FROM (
+  SELECT p."personGroupId"::text AS person_id, p.name, fs.embedding,
+         row_number() OVER (PARTITION BY p."personGroupId" ORDER BY md5(af.id::text)) AS rn
+  FROM person p
+  JOIN asset_face af ON af."personGroupId" = p."personGroupId" AND af."ownerId" = p."ownerId"
+  JOIN face_search fs ON fs."faceId" = af.id
+  WHERE p."ownerId" = %(owner)s AND p.name <> '' AND NOT p."isHidden" AND"""
+    + _FACE_FILTER
+    + """
+) x WHERE rn <= %(cap)s
 """
 )
 
@@ -190,6 +217,23 @@ class Database:
                 for idx, person_id, name, distance in await cur.fetchall():
                     out[idx].append(Neighbour(person_id=person_id, name=name or "", distance=float(distance)))
         return out
+
+    async def named_signature(self) -> tuple:
+        """Cheap change detector for the face cache: count of named faces and the newest change of people and faces."""
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_SIGNATURE_SQL, {"owner": self.status.owner_id})
+                return tuple(await cur.fetchone())
+
+    async def named_faces(self, per_person: int) -> list[tuple]:
+        """(person_id, name, embedding bytes) for up to per_person faces of each named, not hidden person, chosen by a
+        stable pseudo-random order of the face id. Binary transfer (pgvector send format), longer statement timeout."""
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                await conn.execute("SET LOCAL statement_timeout = '180s'")
+                async with conn.cursor(binary=True) as cur:
+                    await cur.execute(_NAMED_FACES_SQL, {"owner": self.status.owner_id, "cap": per_person})
+                    return await cur.fetchall()
 
     async def people(self) -> list[dict]:
         async with self.pool.connection() as conn:
