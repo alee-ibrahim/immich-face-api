@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from urllib.parse import urljoin
+from urllib.parse import quote, unquote, urlencode, urljoin
 
 import httpx
 import numpy as np
@@ -88,20 +90,36 @@ class Fetcher:
         return r.content
 
 
+def _words_capitalised(name: str) -> str:
+    return " ".join(w[:1].upper() + w[1:] if w.islower() else w for w in name.replace("_", " ").split())
+
+
 def parse_cards(src: WebSource, pages: dict[str, str]) -> list[Card]:
-    """Cards of the primary-language page, with names from the other languages joined by card id."""
+    """Cards of the primary-language page, with names from the other languages joined by card id (or taken from
+    ``alt_name_groups`` of the same card)."""
     cards: dict[str, Card] = {}
     base = {p.lang: p.url for p in src.pages}
     for m in src.regex.finditer(pages.get(src.primary_lang, "")):
         g = {k: html.unescape(v).strip() for k, v in m.groupdict().items() if v is not None}
-        if not g.get("id") or not g.get("name") or g["id"] in cards:
+        if not g.get("id") or g["id"] in cards:
+            continue
+        name = _words_capitalised(src.name_template.format(**g)) if src.name_template else g.get("name", "")
+        if not name:
             continue
         cid = g.pop("id")
-        image = g.pop("image", None)
+        g.pop("name", None)
+        image = src.image_template.format(**g) if src.image_template and g.get("image") else g.get("image")
+        g.pop("image", None)
+        alt = {lang: " ".join(g[grp].split()) for lang, grp in src.alt_name_groups.items() if g.get(grp)}
+        for grp in src.alt_name_groups.values():
+            g.pop(grp, None)
+        if src.licence:
+            g["licence"] = src.licence
         cards[cid] = Card(
             source=src.key,
             id=cid,
-            name=" ".join(g.pop("name").split()),
+            name=" ".join(name.split()),
+            alt_names=alt,
             image_url=urljoin(base[src.primary_lang], image) if image else None,
             details=g,
         )
@@ -109,9 +127,64 @@ def parse_cards(src: WebSource, pages: dict[str, str]) -> list[Card]:
         if lang == src.primary_lang:
             continue
         for m in src.regex.finditer(text):
-            cid, name = m.group("id"), m.group("name")
+            cid, name = m.group("id"), m.groupdict().get("name")
             if cid in cards and name:
                 cards[cid].alt_names.setdefault(lang, " ".join(html.unescape(name).split()))
+    return list(cards.values())
+
+
+WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
+COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+_TAGS = re.compile(r"<[^>]+>")
+
+
+def wikidata_cards(src: WebSource, fetcher: Fetcher) -> list[Card]:
+    """Cards from a Wikidata SPARQL query; each Commons image with its licence and author."""
+    body = fetcher.get(
+        WIKIDATA_SPARQL + "?" + urlencode({"query": src.query, "format": "json"}), immutable=False, limit=MAX_PAGE_BYTES
+    )
+    if body is None:
+        return []
+    cards: dict[str, Card] = {}
+    for b in json.loads(body)["results"]["bindings"]:
+        qid = b["item"]["value"].rsplit("/", 1)[-1]
+        name = b.get("itemLabel", {}).get("value", "")
+        img = b.get("image", {}).get("value", "")
+        if not img or not name or name == qid or qid in cards:
+            continue
+        file = unquote(img.rsplit("/", 1)[-1])
+        alt = {k[:-5]: v["value"] for k, v in b.items() if k.endswith("Label") and k != "itemLabel" and v.get("value")}
+        details = {"wikidata": qid, "commons_file": file}
+        if b.get("role", {}).get("value"):
+            details["role"] = b["role"]["value"]
+        meta = fetcher.get(
+            COMMONS_API
+            + "?"
+            + urlencode(
+                {
+                    "action": "query",
+                    "prop": "imageinfo",
+                    "iiprop": "extmetadata",
+                    "format": "json",
+                    "titles": "File:" + file,
+                }
+            ),
+            immutable=False,
+            limit=MAX_PAGE_BYTES,
+        )
+        if meta:
+            for page in json.loads(meta).get("query", {}).get("pages", {}).values():
+                em = (page.get("imageinfo") or [{}])[0].get("extmetadata", {})
+                details["licence"] = em.get("LicenseShortName", {}).get("value", "unknown")
+                details["author"] = _TAGS.sub("", em.get("Artist", {}).get("value", "")).strip()[:200]
+        cards[qid] = Card(
+            source=src.key,
+            id=qid,
+            name=name,
+            alt_names=alt,
+            image_url="https://commons.wikimedia.org/wiki/Special:FilePath/" + quote(file) + "?width=800",
+            details=details,
+        )
     return list(cards.values())
 
 
@@ -171,11 +244,14 @@ def web_references(s: LabelerSettings, store, fetcher: Fetcher, embedder: Embedd
     refs, no_face, images, n = [], [], {}, 0
     for src in s.sources.web:
         pages = {}
-        for p in src.pages:
-            body = fetcher.get(p.url, immutable=False, limit=MAX_PAGE_BYTES)
-            if body is not None:
-                pages[p.lang] = body.decode("utf-8", errors="replace")
-        cards = parse_cards(src, pages)
+        if src.kind == "wikidata":
+            cards = wikidata_cards(src, fetcher)
+        else:
+            for p in src.pages:
+                body = fetcher.get(p.url, immutable=src.immutable, limit=MAX_PAGE_BYTES)
+                if body is not None:
+                    pages[p.lang] = body.decode("utf-8", errors="replace")
+            cards = parse_cards(src, pages)
         n += len(cards)
         if pages and not cards:
             log.warning("web source %s: no cards matched (page layout changed?)", src.key)
@@ -193,6 +269,7 @@ def web_references(s: LabelerSettings, store, fetcher: Fetcher, embedder: Embedd
                 Reference(
                     key=key,
                     kind="web",
+                    source=src.key,
                     name=c.name,
                     centroid=emb,
                     n_photos=1,

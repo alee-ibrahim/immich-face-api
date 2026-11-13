@@ -68,6 +68,7 @@ def folder_references(cfg: SourcesConfig, faces_by_root: dict[str, list[FolderFa
             Reference(
                 key="folder:" + key,
                 kind="folder",
+                source="folder",
                 name=name,
                 centroid=dom.centroid,
                 n_photos=len({f.asset_id for f in members}),

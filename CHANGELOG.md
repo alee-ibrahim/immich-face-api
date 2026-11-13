@@ -5,6 +5,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added (labeler coverage)
+- Named-neighbour vote (`named_people`): more clusters of people already named in Immich.
+- `write_sources`: only approved sources are written; others are proposed and held.
+- Web sources: `kind: "wikidata"` (SPARQL, Commons licence recorded), `name_template`, `image_template`,
+  `alt_name_groups`, `immutable`, `licence`.
+- `worklist` command: the biggest unnamed people the labeler will not name, as an HTML/CSV worklist for curators.
+
 ### Fixed
 - The image sent to the ML server is now lossless PNG instead of a JPEG at quality 92. Re-encoding moved the
   detector's score by up to about 0.006, which dropped faces that sit right at `minScore` (a real frame scored 0.7007

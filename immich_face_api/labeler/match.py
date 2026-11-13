@@ -88,7 +88,7 @@ def dominant_identity(emb: np.ndarray, assets: list[str], areas: list[int], t: T
 @dataclass
 class Reference:
     key: str  # unique, e.g. "folder:/photos/people/Jane Doe/" or "web:members:12"
-    kind: str  # "folder" | "web"
+    kind: str  # "folder" | "web" | "named"
     name: str
     centroid: np.ndarray
     n_photos: int  # photos behind the reference (folder: photos showing the dominant identity; web: 1)
@@ -101,6 +101,7 @@ class Reference:
     face_ids: set[str] = field(default_factory=set)  # the faces of the dominant identity (folder references)
     url: str | None = None
     image_key: str | None = None  # cache key of a portrait (web references), for the report
+    source: str = ""  # "folder", "named" or the web source key: what write_sources allows
 
 
 @dataclass
@@ -162,7 +163,10 @@ def build_identities(refs: list[Reference], t: Thresholds, homonym_detail: str =
     for members in groups.values():
         rs = [refs[i] for i in members]
         # official spelling first (web), then the fullest name (most tokens), then the folder with most photos
-        rs.sort(key=lambda r: (r.kind != "web", -len(name_tokens(r.name)), -r.n_photos, r.key))
+        # a name already in Immich first (it includes corrections people made), then the official web spelling, then
+        # the fullest folder name, then the folder with most photos
+        order = {"named": 0, "web": 1}
+        rs.sort(key=lambda r: (order.get(r.kind, 2), -len(name_tokens(r.name)), -r.n_photos, r.key))
         chosen = rs[0]
         weights = np.array([3.0 if r.kind == "web" else float(min(r.n_photos, 20)) for r in rs], dtype=np.float32)
         centroid = normalise((np.stack([r.centroid for r in rs]) * weights[:, None]).sum(0))
@@ -222,9 +226,19 @@ class Proposal:
     band: str  # high | medium | low
     why_not_high: list[str] = field(default_factory=list)
     hold: list[str] = field(default_factory=list)  # reasons never to write this name automatically (any band)
+    vote: tuple[int, int, int] | None = None  # named-neighbour vote: (faces for the name, faces sampled, people)
+    vote_note: str | None = None  # an agreeing vote on a reference proposal
 
     def evidence(self) -> list[str]:
         ev = []
+        if self.vote:
+            k, n, people = self.vote
+            ev.append(
+                f"named-neighbour vote: {k} of {n} sampled faces have their nearest named face in "
+                f"{people} person(s) named {self.identity.name!r} (median distance {self.distance:.3f})"
+            )
+            ev.extend(HOLD_PREFIX + h for h in self.hold)
+            return ev
         for r in self.identity.refs:
             if r.kind == "folder":
                 cov = f", in {r.coverage:.0%} of its photos" if r.coverage is not None else ""
@@ -237,6 +251,8 @@ class Proposal:
             ev.append(f"{self.consistency:.0%} of the cluster's faces match")
         if self.folder_faces:
             ev.append(f"{self.folder_faces} of the cluster's faces are in the reference folder(s)")
+        if self.vote_note:
+            ev.append(self.vote_note)
         if self.identity.conflicts:
             ev.append("name conflict: " + "; ".join(self.identity.conflicts))
         if self.identity.homonym:
@@ -416,3 +432,84 @@ def merge_candidates(
                     (ca.faces, cb.faces),
                 )
     return sorted(out.values(), key=lambda m: (m.distance, m.a, m.b))
+
+
+def named_vote(
+    unnamed: dict[str, np.ndarray],
+    named: dict[str, np.ndarray],
+    names: dict[str, str],
+    faces: dict[str, int],
+    t: Thresholds,
+    block: int = 2048,
+) -> list[Proposal]:
+    """Unnamed clusters that are other clusters of an already-named person, by a face-level vote (how Immich itself
+    assigns a face: to the person of its nearest face). For each sampled face of an unnamed cluster, its nearest face
+    among the named people's sampled faces; the cluster's share of faces whose nearest named face is within
+    ``face_distance`` AND belongs to the most frequent name. Bands: high = share >= vote_high_share, >= 3 faces and
+    median distance <= vote_max_median; medium = share >= vote_medium_share; low = share >= vote_low_share.
+    Measured 2026-11 on one archive (leave-one-cluster-out over named people): 267 right, 1 wrong at share >= 0.8;
+    0 wrong among people with a single cluster."""
+    if not unnamed or not named:
+        return []
+    npids = list(named)
+    nmat = np.concatenate([named[p] for p in npids])
+    owner_of = np.concatenate([np.full(len(named[p]), i) for i, p in enumerate(npids)])
+    idents: dict[str, Identity] = {}
+    out = []
+    for pid, emb in unnamed.items():
+        best_d = np.empty(len(emb), np.float32)
+        best_o = np.empty(len(emb), np.int64)
+        for s0 in range(0, len(emb), block):
+            sim = emb[s0 : s0 + block] @ nmat.T
+            k = sim.argmax(1)
+            best_d[s0 : s0 + block] = 1.0 - sim[np.arange(len(k)), k]
+            best_o[s0 : s0 + block] = owner_of[k]
+        close = best_d <= t.face_distance
+        if not close.any():
+            continue
+        votes: dict[str, int] = {}
+        for o in best_o[close]:
+            nm = names[npids[o]]
+            votes[nm] = votes.get(nm, 0) + 1
+        top = max(votes, key=lambda n: (votes[n], n))
+        share = votes[top] / len(emb)
+        if share < t.vote_low_share:
+            continue
+        sel = close & np.array([names[npids[o]] == top for o in best_o])
+        med = float(np.median(best_d[sel]))
+        support = sorted({npids[o] for o in best_o[sel]})
+        if top not in idents:
+            ref = Reference(
+                key="named:" + top,
+                kind="named",
+                source="named",
+                name=top,
+                centroid=normalise(np.concatenate([named[q] for q in npids if names[q] == top]).mean(0)),
+                n_photos=0,
+                label="people already named in Immich",
+            )
+            idents[top] = Identity(key="named:" + top, name=top, refs=[ref], centroid=ref.centroid)
+        why = []
+        if share < t.vote_high_share:
+            why.append(f"vote share {share:.2f} < {t.vote_high_share}")
+        if faces.get(pid, len(emb)) < t.high_min_cluster_faces:
+            why.append(f"cluster has {faces.get(pid, len(emb))} face(s) < {t.high_min_cluster_faces}")
+        if med > t.vote_max_median:
+            why.append(f"median distance {med:.3f} > {t.vote_max_median}")
+        band = "high" if not why else "medium" if share >= t.vote_medium_share else "low"
+        prop = Proposal(
+            person_id=pid,
+            faces=faces.get(pid, len(emb)),
+            identity=idents[top],
+            distance=round(med, 4),
+            margin=round(share, 4),
+            runner_up=None,
+            consistency=round(share, 3),
+            folder_faces=0,
+            score=round(_clamp(share), 3),
+            band=band,
+            why_not_high=why,
+        )
+        prop.vote = (votes[top], len(emb), len(support))
+        out.append(prop)
+    return out

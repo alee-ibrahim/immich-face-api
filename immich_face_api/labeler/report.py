@@ -151,3 +151,45 @@ photos of people; do not forward outside the organisation.</p>
 <h2>Merge candidates ({len(merges)}) - proposals only, never merged automatically</h2>
 <table><tr><th>Person A</th><th>Person B</th><th>Distance</th><th>Why</th></tr>{"".join(mrows)}</table>
 </body></html>"""
+
+
+def worklist_csv(rows, props: dict, web_base: str) -> str:
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["rank", "person_id", "faces", "suggestion", "suggestion_band", "held", "immich_url", "name"])
+    for i, c in enumerate(rows, 1):
+        p = props.get(c.person_id) or {}
+        hold = "; ".join(e for e in (p.get("evidence") or []) if e.startswith("HOLD"))
+        w.writerow(
+            [i, c.person_id, c.faces, p.get("name", ""), p.get("band", ""), hold, person_url(web_base, c.person_id), ""]
+        )
+    return out.getvalue()
+
+
+def worklist_html(run_id: str, stats: dict, rows, props: dict, thumbs: dict, web_base: str) -> str:
+    e = html.escape
+    trs = []
+    for i, c in enumerate(rows, 1):
+        t = small_image(thumbs.get(c.person_id), 112)
+        p = props.get(c.person_id) or {}
+        sug = ""
+        if p:
+            hold = [x for x in (p.get("evidence") or []) if x.startswith("HOLD")]
+            sug = f"{e(p['name'])} <span class='tag'>{e(p['band'])}</span>" + (
+                f"<br><span class='ev'>{e('; '.join(hold))}</span>" if hold else ""
+            )
+        url = person_url(web_base, c.person_id)
+        trs.append(
+            f"<tr><td>{i}</td><td>{f'<img src={t!r} width=96>' if t else '-'}</td><td><b>{c.faces}</b></td>"
+            f"<td>{sug}</td><td class='ev'>{f'<a href={url!r}>open in Immich</a><br>' if url else ''}{e(c.person_id)}</td></tr>"
+        )
+    stat_rows = "".join(f"<tr><td>{e(str(k))}</td><td><b>{e(str(v))}</b></td></tr>" for k, v in stats.items())
+    return f"""<!doctype html><html><head><meta charset="utf-8"><title>Unnamed people worklist {e(run_id)}</title>
+<meta name="robots" content="noindex"><style>{_CSS}</style></head><body>
+<h1>Biggest unnamed people (worklist {e(run_id)})</h1>
+<p>The unnamed people with the most faces that the labeler will not name by itself. Open each one in Immich and type
+the name (or hide it if it is not someone to name). Internal: contains photos of people; do not forward outside the
+organisation.</p>
+<table class="stats">{stat_rows}</table>
+<table><tr><th>#</th><th>Face</th><th>Faces</th><th>Suggestion (not applied)</th><th>Person</th></tr>{"".join(trs)}</table>
+</body></html>"""
