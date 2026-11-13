@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- Identify timed out once many people were named. The exact SQL search read every named face (about 4.4 s per
+  detected face at 55,000 named faces), so group photos hit the statement timeout. Named faces are now cached in
+  memory (float16, up to 100 per person, refreshed on change) and searched with numpy, in milliseconds.
+- Database timeouts and a busy connection pool now return `503 busy` with `Retry-After` instead of `502`.
+
+### Fixed
 - The image sent to the ML server is now lossless PNG instead of a JPEG at quality 92. Re-encoding moved the
   detector's score by up to about 0.006, which dropped faces that sit right at `minScore` (a real frame scored 0.7007
   from the original and 0.6994 after the re-encode, so it was missed at 0.7). Images are still never upscaled.

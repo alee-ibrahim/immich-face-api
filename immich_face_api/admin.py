@@ -177,13 +177,16 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
         await state.db.open()
         await state.store.open(migrate=True)
         task = asyncio.create_task(state.readiness_loop())
+        cache_task = asyncio.create_task(state.faces.loop()) if state.faces is not None else None
         log.info("admin started", extra={"fields": {"version": __version__, "oidc": settings.oidc_enabled}})
         try:
             yield
         finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            for t in (task, cache_task):
+                if t is not None:
+                    t.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await t
             await state.ml.close()
             await state.db.close()
             await state.store.close()

@@ -14,14 +14,17 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from prometheus_client import start_http_server
+from psycopg_pool import PoolTimeout
 
 from . import __version__
 from . import metrics as m
 from .config import Settings
 from .db import Database, SchemaMismatch
+from .facecache import FaceCache
 from .imaging import ImageRejected, prepare
 from .matching import decide, normalise_box
 from .ml import MLClient, MLError
@@ -121,6 +124,19 @@ def extract_image(content_type: str, body: bytes) -> bytes:
     raise HttpError(400, "bad_request", 'multipart field "image" is missing')
 
 
+def db_failure(exc: Exception, rid: str, message: str) -> HttpError:
+    """A database problem as an HTTP error: timeouts and a busy pool are temporary (503 + Retry-After, logged as a
+    warning); anything else is unexpected (502, reported to Sentry/GlitchTip, scrubbed)."""
+    m.DB_ERRORS.inc()
+    if isinstance(exc, psycopg.errors.QueryCanceled | psycopg.errors.LockNotAvailable | PoolTimeout):
+        log.warning("db busy", extra={"fields": {"rid": rid, "error": type(exc).__name__}})
+        return HttpError(
+            503, "busy", "the photo archive database is busy, retry in a few seconds", {"Retry-After": "10"}
+        )
+    log.error("db error", exc_info=True, extra={"fields": {"rid": rid, "error": type(exc).__name__}})
+    return HttpError(502, "upstream", message)
+
+
 class State:
     def __init__(self, settings: Settings):
         self.s = settings
@@ -129,6 +145,11 @@ class State:
         self.db = Database(settings)
         self.ml = MLClient(settings.ml_url, settings.face_model, settings.min_score, settings.ml_timeout)
         self.ml_slots = asyncio.Semaphore(settings.max_concurrent_ml)
+        self.faces = (
+            FaceCache(self.db, settings.face_cache_per_person, settings.face_cache_refresh_seconds, settings.knn)
+            if settings.face_cache
+            else None
+        )
         self.store = (
             Store(settings.store_url, settings.store_password, settings.store_pool_size, settings.key_cache_seconds)
             if settings.store_url
@@ -195,13 +216,14 @@ class State:
         m.STAGE.labels("ml").observe(time.perf_counter() - t1)
 
         t2 = time.perf_counter()
+        embeddings = [f.embedding for f in faces]
         try:
-            neighbours = await state.db.nearest([f.embedding for f in faces], include_unnamed=include_unnamed)
+            if state.faces is not None and state.faces.ready and not include_unnamed:
+                neighbours = await state.faces.nearest(embeddings)  # in memory, milliseconds
+            else:  # cache not loaded yet, or test mode: exact search in the database
+                neighbours = await state.db.nearest(embeddings, include_unnamed=include_unnamed)
         except Exception as exc:  # noqa: BLE001
-            m.DB_ERRORS.inc()
-            # unexpected: reported to Sentry/GlitchTip (scrubbed), unlike transient ML errors
-            log.error("db error", exc_info=True, extra={"fields": {"rid": rid, "error": type(exc).__name__}})
-            raise HttpError(502, "upstream", "face search failed") from exc
+            raise db_failure(exc, rid, "face search failed") from exc
         m.STAGE.labels("db").observe(time.perf_counter() - t2)
 
         out_faces, matched, ambiguous = [], 0, 0
@@ -267,6 +289,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state: State = app.state.face
         await state.db.open()
         tasks = [asyncio.create_task(state.readiness_loop())]
+        if state.faces is not None:
+            tasks.append(asyncio.create_task(state.faces.loop()))
         if state.store:
             await state.store.open(migrate=True, wait=False)
             tasks.append(asyncio.create_task(state.store.flush_loop(settings.usage_retention_days)))
@@ -440,9 +464,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 rows = await state.db.people()
             except Exception as exc:  # noqa: BLE001
-                m.DB_ERRORS.inc()
-                log.error("db error", exc_info=True, extra={"fields": {"rid": request.state.rid}})
-                raise HttpError(502, "upstream", "people lookup failed") from exc
+                raise db_failure(exc, request.state.rid, "people lookup failed") from exc
             request.state.fields = {"people": len(rows)}
             return {"people": rows, "count": len(rows)}
         except HttpError as exc:
