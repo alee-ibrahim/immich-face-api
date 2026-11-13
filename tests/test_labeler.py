@@ -451,3 +451,18 @@ def test_share_names_fills_only_empty_copies_and_undo_reverts_only_unchanged():
     applied = [r for r in st.rows if r["status"] == "applied"]
     assert undo_copies(w, st, "u", applied) == Counter(undone=1, changed_since=1)
     assert names[("u1", "g1")] == "" and names[("u1", "g2")] == "Renamed By Curator"
+
+
+def test_run_is_a_dry_run_unless_bands_are_given():
+    import inspect
+
+    p = cli.build_parser()
+    assert cli.apply_bands_of(p.parse_args(["run"])) == []
+    assert cli.apply_bands_of(p.parse_args(["run", "--apply-band", "none"])) == []
+    assert cli.apply_bands_of(p.parse_args(["run", "--apply-band", "high", "--apply-band", "medium"])) == [
+        "high",
+        "medium",
+    ]
+    # regression: the band list must not be shadowed later in cmd_run (a Counter of proposals once was)
+    src = inspect.getsource(cli.cmd_run)
+    assert src.count("apply_bands =") == 1 and "bands =" not in src.replace("apply_bands =", "")
