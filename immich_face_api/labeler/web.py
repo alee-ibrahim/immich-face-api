@@ -19,6 +19,7 @@ import numpy as np
 from ..imaging import ImageRejected, prepare
 from ..ml import face_entries, parse_faces
 from .match import Reference, normalise, parse_vector
+from .names import tidy_name
 from .settings import LabelerSettings, WebSource
 
 log = logging.getLogger(__name__)
@@ -256,6 +257,9 @@ def web_references(s: LabelerSettings, store, fetcher: Fetcher, embedder: Embedd
         if pages and not cards:
             log.warning("web source %s: no cards matched (page layout changed?)", src.key)
         for c in cards:
+            # titles off / kept titles written one way (config names.titles, names.keep_titles)
+            c.name = tidy_name(c.name, s.sources.names)
+            c.alt_names = {lang: tidy_name(v, s.sources.names) for lang, v in c.alt_names.items()}
             key = f"web:{src.key}:{c.id}"
             img = fetcher.get(c.image_url, immutable=True, limit=MAX_IMAGE_BYTES) if c.image_url else None
             faces = embedder.faces(img) if img else []

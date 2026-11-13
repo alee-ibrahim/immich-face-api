@@ -697,6 +697,8 @@ python -m immich_face_api.labeler run --apply-band high     # nightly, once you 
 python -m immich_face_api.labeler share-names [--dry-run]   # owner names into empty shared copies (below)
 python -m immich_face_api.labeler undo --copies --run <share-names-run>   # or --person <id> ...
 python -m immich_face_api.labeler worklist --top 200        # biggest unnamed people the labeler will not name
+python -m immich_face_api.labeler tidy-names [--apply]      # remove titles from owner names (below)
+python -m immich_face_api.labeler tidy-names --copies [--apply]   # ... and from copies that follow the owner name
 python -m immich_face_api.labeler status
 ```
 
@@ -713,6 +715,27 @@ touched. It writes through the database (Immich has no API to write another user
 SELECT person ("ownerId", "personGroupId", name), person_user ("personGroupId", "sharedById", "sharedWithId"),
 version_history (version, "createdAt") and UPDATE person (name) only; same version pin and privilege check. Every copy
 is audited (`target = 'copy'`) and `undo --copies` reverts only copies still holding the copied name.
+
+### Titles (`names.titles`, `names.keep_titles`, `tidy-names`)
+
+Names should not carry honorifics ("Hon.", "MP", "Mr", "His Excellency" ...). List them in the config:
+
+```json
+"names": { "titles": ["Hon", "MP", "Mr", "His Excellency"], "keep_titles": { "Dr": "Dr.", "Doctor": "Dr." } }
+```
+
+Titles are matched as whole words at the **start or end** of a name only, case-insensitively, ignoring dots and
+commas ("M.P." = "MP") and parentheses ("(MP)"); several words form one title. A title in `keep_titles` stays, written
+one way and first ("Dr Jane Example" -> "Dr. Jane Example"). Whitespace is collapsed and all-upper/all-lower words are
+capitalised. Applied to folder names, web and Wikidata cards (also other-language names), and once more right before
+every write, so the labeler never writes a title.
+
+`tidy-names` cleans names already in Immich (dry run unless `--apply`; the dry run logs counts per title, a sample and
+the doubtful names). Owner names are written through the API, whoever set them, but only the title words change.
+`--copies` does the users' copies through the `share-names` role, only where the copy without its titles equals the
+owner's tidy name (run the owner step first); a copy with its own spelling is listed and left alone. Names with a title
+word *inside* the name are listed as doubtful and never changed. Every write is audited; `undo --run <id>` (owner) and
+`undo --copies --run <id>` revert names nobody has changed since.
 
 ## Development
 

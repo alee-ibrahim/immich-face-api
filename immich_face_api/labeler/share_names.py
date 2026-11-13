@@ -53,6 +53,13 @@ WHERE c."ownerId" = %(user)s AND c."personGroupId" = %(group)s AND c.name = ''
 RETURNING c.name
 """
 
+COPIES_WITH_OWNER_SQL = """
+SELECT c."personGroupId"::text, c."ownerId"::text, c.name, coalesce(o.name, '')
+FROM person c LEFT JOIN person o ON o."personGroupId" = c."personGroupId" AND o."ownerId" = %(owner)s
+WHERE c."ownerId" <> %(owner)s AND c.name <> ''
+ORDER BY 1, 2
+"""
+
 UNDO_SQL = """
 UPDATE person SET name = %(old)s
 WHERE "ownerId" = %(user)s AND "personGroupId" = %(group)s AND name = %(new)s
@@ -99,6 +106,14 @@ class NameWriter:
         return bool(
             self.conn.execute(COPY_SQL, {"owner": owner, "user": user, "group": group, "name": name}).fetchall()
         )
+
+    def copies_with_owner(self, owner: str) -> list[tuple[str, str, str, str]]:
+        """(group, user, copy name, owner name) of every named copy of another user (tidy-names --copies)."""
+        return self.conn.execute(COPIES_WITH_OWNER_SQL, {"owner": owner}).fetchall()
+
+    def rename(self, user: str, group: str, old: str, new: str) -> bool:
+        """Rename one user's copy, only if it still has ``old`` (tidy-names --copies)."""
+        return self.revert(user, group, old, new)
 
     def revert(self, user: str, group: str, new: str, old: str) -> bool:
         return bool(self.conn.execute(UNDO_SQL, {"user": user, "group": group, "new": new, "old": old}).fetchall())
