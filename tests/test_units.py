@@ -244,3 +244,9 @@ def test_api_reference_covers_every_operation():
     assert {"faces", "faces[].box", "faces[].box.x", "faces[].candidates[].votes", "image"} <= names
     assert identify["auth"] and not next(o for o in ops if o["path"] == "/healthz")["auth"]
     assert identify["responses"][0]["example"]
+
+
+def test_inline_code_filter_escapes():
+    from immich_face_api.admin import inline_code
+
+    assert str(inline_code("use `X-API-Key` <b>")) == "use <code>X-API-Key</code> &lt;b&gt;"

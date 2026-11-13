@@ -11,7 +11,7 @@
 <article>
 <h1>API reference</h1>
 <p class="lead">{{ spec.info.title }} {{ spec.info.version }} · OpenAPI {{ spec.openapi }} · base URL <code>{{ base }}</code></p>
-<p>{{ spec.info.description }}</p>
+<p>{{ spec.info.description | inline_code }}</p>
 <p class="muted">Generated from the OpenAPI document bundled with this version. <a href="/docs/openapi.json">Download openapi.json</a>
 (admins; it is not published on the API itself).</p>
 
@@ -24,13 +24,13 @@
   <h3>Parameters</h3>
   <div class="scroll"><table class="kv">
     <tr><th>Name</th><th>In</th><th>Type</th><th>Required</th><th>Description</th></tr>
-    {% for p in op.parameters %}<tr><td><code>{{ p.name }}</code></td><td>{{ p.in }}</td><td>{{ p.type }}</td><td>{{ "yes" if p.required else "no" }}</td><td class="wrap">{{ p.description }}</td></tr>{% endfor %}
+    {% for p in op.parameters %}<tr><td><code>{{ p.name }}</code></td><td>{{ p.in }}</td><td>{{ p.type }}</td><td>{{ "yes" if p.required else "no" }}</td><td class="wrap">{{ p.description | inline_code }}</td></tr>{% endfor %}
   </table></div>
   {% endif %}
 
   {% if op.body %}
   <h3>Request body</h3>
-  <ul>{% for b in op.body %}<li><code>{{ b.media }}</code>{% for f in b.fields %}: field <code>{{ f.name }}</code> ({{ f.type }}){% if f.description %}, {{ f.description }}{% endif %}{% endfor %}</li>{% endfor %}</ul>
+  <ul>{% for b in op.body %}<li><code>{{ b.media }}</code>{% for f in b.fields %}: field <code>{{ f.name }}</code> ({{ f.type }}){% if f.description %}, {{ f.description | inline_code }}{% endif %}{% endfor %}</li>{% endfor %}</ul>
   {% endif %}
 
   <h3>Responses</h3>
@@ -40,7 +40,7 @@
     {% if r.fields %}
     <div class="scroll"><table class="kv">
       <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
-      {% for f in r.fields %}<tr><td class="d{{ f.depth }}"><code>{{ f.name }}</code></td><td class="wrap">{{ f.type }}</td><td>{{ "yes" if f.required else "" }}</td><td class="wrap">{{ f.description }}</td></tr>{% endfor %}
+      {% for f in r.fields %}<tr><td class="d{{ f.depth }}"><code>{{ f.name }}</code></td><td class="wrap">{{ f.type }}</td><td>{{ "yes" if f.required else "" }}</td><td class="wrap">{{ f.description | inline_code }}</td></tr>{% endfor %}
     </table></div>
     {% endif %}
     {% if r.example %}<div class="pane solo"><button type="button" class="copy ghost">Copy</button><pre><code>{{ r.example }}</code></pre></div>{% endif %}

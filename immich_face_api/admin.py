@@ -24,6 +24,7 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
+from markupsafe import Markup, escape
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__
@@ -91,7 +92,13 @@ def ms(v: float | None) -> str:
     return f"{v / 1000:.1f} s" if v >= 1000 else f"{v:.0f} ms"
 
 
-templates.env.filters.update(ago=ago, until=until, ms=ms)
+def inline_code(text: str) -> Markup:
+    """Escape, then turn `x` into <code>x</code> (OpenAPI descriptions)."""
+    parts = str(escape(text or "")).split("`")
+    return Markup("".join(f"<code>{p}</code>" if i % 2 else p for i, p in enumerate(parts)))  # noqa: S704 - parts are escaped
+
+
+templates.env.filters.update(ago=ago, until=until, ms=ms, inline_code=inline_code)
 templates.env.globals.update(pct=pct)
 
 
