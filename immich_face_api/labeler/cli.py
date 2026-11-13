@@ -113,6 +113,16 @@ def cmd_run(s: LabelerSettings, args) -> int:
         stats["name_folders_with_faces"] = fres.folders
         stats["folder_references"] = len(fres.refs)
         stats["folder_references_ambiguous"] = sum(r.ambiguous for r in fres.refs)
+        ref_faces = {f for r in fres.refs for f in r.face_ids}
+        if ref_faces:
+            unclustered = len(ref_faces - set(fres.face_person))
+            stats["reference_faces_not_in_a_person_yet"] = unclustered
+            if unclustered / len(ref_faces) > 0.1:
+                notes.append(
+                    f"Clustering is partial: {unclustered} of {len(ref_faces)} faces of the reference folders are not in "
+                    "any person yet (Immich's facial recognition is still running). Those people get proposals in a "
+                    "later run, once their faces are clustered."
+                )
 
         portraits: dict[str, bytes] = {}
         wrefs = []
@@ -305,6 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per request (person ids) is noise
     args = build_parser().parse_args(argv)
     try:
         s = LabelerSettings.from_env()

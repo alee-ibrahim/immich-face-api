@@ -72,6 +72,11 @@ def test_compatible_and_homonym_keys():
     assert compatible("Ibrahim Suja", "Ibrahim Shujau")
     assert compatible("Rasheedh Ali", "Rasheed Ali")
     assert not compatible("Ali Rifau", "Abdulla Rifau")
+    assert compatible("Adbul Sattar", "Abdul Sattar")  # one typo per word
+    assert compatible("Jane AbdulRahmaan", "Jane Abdul Rahman")  # joined words
+    assert not compatible("Ali Riza", "Ali Rifau")
+    assert clean_name("jane doe", RULES) == "Jane Doe" and clean_name("Jane doe", RULES) == "Jane Doe"
+    assert clean_name("Jane McDoe", RULES) == "Jane McDoe"
     assert name_key("Mohamed Rasheed") == name_key("Mohamed Rashid")
     assert name_key("Hassan Waheed") != name_key("Hussain Waheed")
     assert name_key("Abdulla Ahmed") != name_key("Ahmed Abdulla")
