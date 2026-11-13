@@ -27,7 +27,7 @@ from .matching import decide, normalise_box
 from .ml import MLClient, MLError
 from .openapi import OPENAPI_SPEC
 from .scrub import scrub_breadcrumb, scrub_event
-from .security import ApiKeys, RateLimiter
+from .security import ApiKeys, RateLimiter, token_from_headers
 from .store import Store, split_key
 
 log = logging.getLogger("immich_face_api")
@@ -362,13 +362,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """API key first (env keys, then store keys), then the rate limit, then readiness. Runs before the body is
         read and before any ML or Immich call."""
         state: State = request.app.state.face
-        header = request.headers.get("authorization")
-        client = state.keys.client_for(header)
+        header, x_key = request.headers.get("authorization"), request.headers.get("x-api-key")
+        client = state.keys.client_for(header, x_key)
         per_minute = None
-        if client is None and state.store and header:
-            scheme, _, token = header.partition(" ")
-            token = token.strip()
-            prefix = split_key(token) if scheme.lower() == "bearer" and len(token) <= 512 else None
+        token = token_from_headers(header, x_key)
+        if client is None and state.store and token:
+            prefix = split_key(token)
             if prefix:
                 try:
                     key = await state.store.lookup(prefix)

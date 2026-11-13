@@ -152,6 +152,7 @@ class Settings:
     oidc_admin_claim: str = ""
     oidc_admin_values: tuple[str, ...] = ()
     admin_token: str = field(default="", repr=False)
+    docs_base_url: str = ""  # API base URL shown in the admin docs; default: the request's own host
 
     @property
     def oidc_enabled(self) -> bool:
@@ -233,4 +234,5 @@ class Settings:
             oidc_admin_claim=_env("OIDC_ADMIN_CLAIM", "") or "",
             oidc_admin_values=admin_values,
             admin_token=_secret("ADMIN_TOKEN") or "",
+            docs_base_url=(_env("DOCS_BASE_URL", "") or "").rstrip("/"),
         )

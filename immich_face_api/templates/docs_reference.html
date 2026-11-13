@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}API reference{% endblock %}
+{% block body %}
+<div class="docs">
+<nav class="toc" aria-label="Endpoints">
+  <b>Endpoints</b>
+  {% for op in ops %}<a href="#{{ op.id }}"><span class="method {{ op.method | lower }}">{{ op.method }}</span> {{ op.path }}</a>{% endfor %}
+  <a href="/docs">← Docs</a>
+  <a href="/docs/openapi.json">openapi.json ↓</a>
+</nav>
+<article>
+<h1>API reference</h1>
+<p class="lead">{{ spec.info.title }} {{ spec.info.version }} · OpenAPI {{ spec.openapi }} · base URL <code>{{ base }}</code></p>
+<p>{{ spec.info.description }}</p>
+<p class="muted">Generated from the OpenAPI document bundled with this version. <a href="/docs/openapi.json">Download openapi.json</a>
+(admins; it is not published on the API itself).</p>
+
+{% for op in ops %}
+<section class="op" id="{{ op.id }}">
+  <h2><span class="method {{ op.method | lower }}">{{ op.method }}</span> <code>{{ op.path }}</code></h2>
+  <p>{{ op.summary }}{% if op.auth %} <span class="chip">API key</span>{% else %} <span class="chip">no auth</span>{% endif %}</p>
+
+  {% if op.parameters %}
+  <h3>Parameters</h3>
+  <div class="scroll"><table class="kv">
+    <tr><th>Name</th><th>In</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    {% for p in op.parameters %}<tr><td><code>{{ p.name }}</code></td><td>{{ p.in }}</td><td>{{ p.type }}</td><td>{{ "yes" if p.required else "no" }}</td><td class="wrap">{{ p.description }}</td></tr>{% endfor %}
+  </table></div>
+  {% endif %}
+
+  {% if op.body %}
+  <h3>Request body</h3>
+  <ul>{% for b in op.body %}<li><code>{{ b.media }}</code>{% for f in b.fields %}: field <code>{{ f.name }}</code> ({{ f.type }}){% if f.description %}, {{ f.description }}{% endif %}{% endfor %}</li>{% endfor %}</ul>
+  {% endif %}
+
+  <h3>Responses</h3>
+  {% for r in op.responses %}
+  <details {{ 'open' if r.status == '200' }}>
+    <summary><b>{{ r.status }}</b> {{ r.description }}{% if r.media %} · <code>{{ r.media }}</code>{% endif %}</summary>
+    {% if r.fields %}
+    <div class="scroll"><table class="kv">
+      <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+      {% for f in r.fields %}<tr><td class="d{{ f.depth }}"><code>{{ f.name }}</code></td><td class="wrap">{{ f.type }}</td><td>{{ "yes" if f.required else "" }}</td><td class="wrap">{{ f.description }}</td></tr>{% endfor %}
+    </table></div>
+    {% endif %}
+    {% if r.example %}<div class="pane solo"><button type="button" class="copy ghost">Copy</button><pre><code>{{ r.example }}</code></pre></div>{% endif %}
+  </details>
+  {% endfor %}
+</section>
+{% endfor %}
+</article>
+</div>
+<script src="/static/docs.js"></script>
+{% endblock %}

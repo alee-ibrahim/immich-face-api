@@ -165,7 +165,9 @@ metrics, never the key.
 
 A small web UI for the people who run the service: **usage analytics** and **API keys per app**. It is a separate
 process from the same image (`python -m immich_face_api admin`, port **8081**). Keep it on an internal network and
-never route it publicly; the API port (8080) never serves it.
+never route it publicly; the API port (8080) never serves it. Its paths (`/`, `/login`, `/auth/callback`, `/logout`,
+`/usage`, `/keys`, `/try`, `/docs`, `/static`) do not overlap the API's (`/v1/*`, `/healthz`, `/openapi.json`), so one
+internal hostname can serve both: route `/v1/` and `/healthz` to the API, everything else to the admin.
 
 | Page | What |
 | --- | --- |
@@ -173,6 +175,7 @@ never route it publicly; the API port (8080) never serves it.
 | Usage | the same for one app, with a table view |
 | Apps & keys | create a key for an app (owner, label, rate limit per minute, expiry); the key is **shown once**; revoke; last used; an audit list of who created or revoked what. Keys from `FACE_API_API_KEYS` are listed read-only |
 | Try it | upload a photo, see the boxes and names drawn over it (same pipeline as `/v1/identify`); nothing is stored or counted |
+| Docs | quick start, authentication, endpoints with examples (curl, PHP/Laravel, Python, Node; language tabs and copy buttons), limits, errors, best practices; an API reference rendered from the bundled OpenAPI document and a download of `openapi.json`. The base URL shown is `FACE_API_DOCS_BASE_URL` (default: the request's own host) |
 
 **Keys made in the UI** look like `ifa_<8 hex>_<43 random characters>`. The prefix is stored in clear (to tell keys
 apart and to find them), the whole key only as SHA-256; it is compared in constant time. A key can carry its own rate
@@ -210,13 +213,14 @@ or style.
 | `FACE_API_OIDC_SCOPES` | `openid email profile` | |
 | `FACE_API_OIDC_ADMIN_CLAIM`, `FACE_API_OIDC_ADMIN_VALUES` | | optional claim filter (see above) |
 | `FACE_API_ADMIN_TOKEN` / `_FILE` | | bootstrap sign-in when OIDC is not configured |
+| `FACE_API_DOCS_BASE_URL` | request host | the API base URL shown in the admin docs (e.g. the public API host) |
 
 With a store configured, `FACE_API_API_KEYS` becomes optional.
 
 ## API
 
 OpenAPI 3.1: [`immich_face_api/openapi.json`](immich_face_api/openapi.json), also served at `GET /openapi.json`.
-All `/v1` endpoints need `Authorization: Bearer <api key>`. Responses are JSON with `Cache-Control: no-store`.
+All `/v1` endpoints need the API key: `Authorization: Bearer <api key>` or `X-API-Key: <api key>`. Responses are JSON with `Cache-Control: no-store`.
 There is **no CORS**: call it from your server, never from a browser.
 
 ### `POST /v1/identify`

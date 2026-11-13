@@ -230,3 +230,17 @@ def test_parse_faces():
     assert faces[0].embedding == "[0.1,0.2]" and faces[1].embedding == "[0.1, 0.2]"
     with pytest.raises(MLError):
         parse_faces({"clip": []})
+
+
+def test_api_reference_covers_every_operation():
+    from immich_face_api.apidocs import reference
+    from immich_face_api.openapi import OPENAPI_SPEC
+
+    ops = reference()
+    documented = {(p, m.upper()) for p, item in OPENAPI_SPEC["paths"].items() for m in item}
+    assert {(o["path"], o["method"]) for o in ops} == documented
+    identify = next(o for o in ops if o["path"] == "/v1/identify")
+    names = {f["name"] for f in identify["responses"][0]["fields"]}
+    assert {"faces", "faces[].box", "faces[].box.x", "faces[].candidates[].votes", "image"} <= names
+    assert identify["auth"] and not next(o for o in ops if o["path"] == "/healthz")["auth"]
+    assert identify["responses"][0]["example"]

@@ -23,17 +23,14 @@ class ApiKeys:
     def __init__(self, hashed: dict[str, bytes]):
         self._hashed = dict(hashed)
 
-    def client_for(self, authorization: str | None) -> str | None:
-        """Client name for an ``Authorization: Bearer <key>`` header, else None.
+    def client_for(self, authorization: str | None, x_api_key: str | None = None) -> str | None:
+        """Client name for the presented key (``Authorization: Bearer <key>`` or ``X-API-Key: <key>``), else None.
 
         Every stored digest is compared, with hmac.compare_digest, whatever the outcome, so the time taken does
         not tell which client (if any) almost matched.
         """
-        if not authorization:
-            return None
-        scheme, _, token = authorization.partition(" ")
-        token = token.strip()
-        if scheme.lower() != "bearer" or not token or len(token) > 512:
+        token = token_from_headers(authorization, x_api_key)
+        if token is None:
             return None
         presented = hashlib.sha256(token.encode("utf-8")).digest()
         found = None
@@ -41,6 +38,22 @@ class ApiKeys:
             if hmac.compare_digest(presented, digest) and found is None:
                 found = name
         return found
+
+
+def token_from_headers(authorization: str | None, x_api_key: str | None) -> str | None:
+    """The key from ``X-API-Key`` (wins if present) or ``Authorization: Bearer``; None if missing or oversized."""
+    if x_api_key is not None:
+        token = x_api_key.strip()
+    elif authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer":
+            return None
+        token = token.strip()
+    else:
+        return None
+    if not token or len(token) > 512:
+        return None
+    return token
 
 
 class RateLimiter:

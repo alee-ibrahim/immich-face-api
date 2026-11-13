@@ -210,3 +210,33 @@ async def test_api_starts_and_serves_env_keys_without_store(settings):
         assert state.store.buffer.drain()  # counted in memory, waiting for the store
     finally:
         await state.store.close()
+
+
+async def test_admin_docs(store_settings):
+    app, c = await admin_client(store_settings)
+    async with c:
+        assert (await c.get("/docs")).status_code == 303  # behind sign-in
+        await sign_in(c)
+        r = await c.get("/docs")
+        assert r.status_code == 200
+        assert "http://admin.test/v1/identify" in r.text  # default: the request's own host
+        assert 'data-lang="php"' in r.text and "X-API-Key" in r.text and 'src="/static/docs.js"' in r.text
+        assert not re.search(r"<script(?![^>]*\bsrc=)", r.text)  # no inline script (strict CSP)
+        assert "&lt;secret&gt;" in r.text  # code is escaped
+        ref = await c.get("/docs/reference")
+        assert ref.status_code == 200
+        for path in ("/v1/identify", "/v1/people", "/healthz"):
+            assert path in ref.text
+        assert "box.x" in ref.text and "candidates[].votes" in ref.text
+        spec = await c.get("/docs/openapi.json")
+        assert spec.status_code == 200 and "attachment" in spec.headers["content-disposition"]
+        assert spec.json()["servers"] == [{"url": "http://admin.test"}]
+        assert (await c.get("/static/docs.js")).status_code == 200
+    await app.state.face.store.close()
+
+    custom = dataclasses.replace(store_settings, docs_base_url="https://faces.example.org")
+    app, c = await admin_client(custom)
+    async with c:
+        await sign_in(c)
+        assert "https://faces.example.org/v1/identify" in (await c.get("/docs")).text
+    await app.state.face.store.close()

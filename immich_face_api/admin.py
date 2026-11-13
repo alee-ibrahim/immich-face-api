@@ -27,15 +27,22 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__
+from .apidocs import reference
 from .app import HttpError, State, extract_image, read_body
 from .charts import bar_chart, line_chart
 from .config import ConfigError, Settings
+from .openapi import OPENAPI_SPEC
 from .store import series, since_for, totals
 from .usage import percentile
 
 log = logging.getLogger("immich_face_api.admin")
 templates = Jinja2Templates(directory=str(files(__package__).joinpath("templates")))
-STATIC = {"admin.css": "text/css", "try.js": "text/javascript", "confirm.js": "text/javascript"}
+STATIC = {
+    "admin.css": "text/css",
+    "try.js": "text/javascript",
+    "confirm.js": "text/javascript",
+    "docs.js": "text/javascript",
+}
 APP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
@@ -404,6 +411,44 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
         ok = await app.state.face.store.revoke_key(key_id, u["id"])
         log.info("api key revoked", extra={"fields": {"id": key_id, "by": u["id"], "ok": ok}})
         return RedirectResponse("/keys", 303)
+
+    # ------------------------------------------------------------------ docs
+
+    def docs_base(request: Request) -> str:
+        if settings.docs_base_url:
+            return settings.docs_base_url
+        proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+        return f"{proto}://{request.headers.get('host') or request.url.netloc}"
+
+    def limits() -> dict:
+        return {
+            "max_mb": round(settings.max_upload_bytes / (1024 * 1024), 1),
+            "max_mp": round(settings.max_pixels / 1_000_000),
+            "rate": settings.rate_limit_per_minute,
+            "burst": settings.rate_limit_burst,
+            "ml_timeout": int(settings.ml_timeout),
+            "queue_timeout": int(settings.ml_queue_timeout),
+            "max_candidates": settings.max_candidates,
+            "max_distance": settings.max_distance,
+            "model": settings.face_model,
+            "immich": settings.expected_immich_version,
+            "max_edge": settings.max_edge,
+            "people": settings.enable_people,
+        }
+
+    @app.get("/docs")
+    async def docs(request: Request, u: User):
+        return render(request, "docs.html", base=docs_base(request), lim=limits())
+
+    @app.get("/docs/reference")
+    async def docs_reference(request: Request, u: User):
+        return render(request, "docs_reference.html", base=docs_base(request), ops=reference(), spec=OPENAPI_SPEC)
+
+    @app.get("/docs/openapi.json")
+    async def docs_openapi(request: Request, u: User):
+        spec = dict(OPENAPI_SPEC)
+        spec["servers"] = [{"url": docs_base(request)}]
+        return JSONResponse(spec, headers={"Content-Disposition": 'attachment; filename="openapi.json"'})
 
     # ------------------------------------------------------------------ try it
 

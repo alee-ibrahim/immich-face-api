@@ -210,3 +210,14 @@ async def test_auth_before_body_ml_and_db(settings):
     r = await c.post("/v1/identify", content=b"\0" * (settings.max_upload_bytes + 1024 * 1024))
     assert r.status_code == 401
     assert st.ml.calls == [] and st.db.include_unnamed is None
+
+
+async def test_x_api_key_header(settings):
+    app, c = make(settings)
+    img = synthetic_jpeg(200, 200)
+    assert (await c.post("/v1/identify", headers={"X-API-Key": KEY}, content=img)).status_code == 200
+    assert (await c.post("/v1/identify", headers={"X-API-Key": "wrong-" + "z" * 40}, content=img)).status_code == 401
+    # X-API-Key wins over Authorization when both are sent
+    r = await c.post("/v1/identify", headers={"X-API-Key": "wrong-" + "z" * 40, **AUTH}, content=img)
+    assert r.status_code == 401
+    assert (await c.get("/v1/people", headers={"X-API-Key": KEY})).status_code == 200

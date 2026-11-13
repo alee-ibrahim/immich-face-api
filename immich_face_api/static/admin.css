@@ -118,3 +118,39 @@ svg.chart .hit:hover .bar { opacity: .85; }
   .row { flex-direction: column; align-items: stretch; }
   .row > label, .row > button { width: 100%; }
 }
+
+/* docs */
+.docs { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 28px; align-items: start; }
+.docs .toc { position: sticky; top: 16px; display: grid; gap: 6px; font-size: 13px; padding-top: 4px; }
+.docs .toc b { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.docs .toc a { color: var(--muted); }
+.docs .toc a:hover { color: var(--ink); }
+.docs article { min-width: 0; }
+.docs article h2 { font-size: 17px; margin: 34px 0 10px; padding-top: 4px; scroll-margin-top: 12px; }
+.docs article h3 { font-size: 14px; margin: 18px 0 8px; }
+.docs article p, .docs article li { max-width: 78ch; }
+.docs .lead { font-size: 15px; color: var(--ink); }
+.docs .practices li { margin-bottom: 8px; }
+table.kv { margin: 8px 0 14px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+table.kv td { white-space: normal; }
+table.kv td.d1 { padding-left: 24px; } table.kv td.d2 { padding-left: 38px; } table.kv td.d3 { padding-left: 52px; }
+.method { display: inline-block; font: 600 11px/1.6 ui-monospace, Consolas, monospace; padding: 0 6px; border-radius: 4px;
+  background: var(--chip); color: var(--ink); vertical-align: middle; }
+.method.post { color: var(--accent); } .method.get { color: var(--good); }
+.tabs { margin: 10px 0 16px; }
+.tablist { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: -1px; }
+.tab { background: transparent; color: var(--muted); border: 1px solid var(--line); border-bottom: 0;
+  border-radius: 6px 6px 0 0; padding: 4px 12px; font-weight: 500; }
+.tab.on { background: var(--code); color: var(--ink); font-weight: 600; }
+.pane { position: relative; background: var(--code); border: 1px solid var(--line); border-radius: 0 6px 6px 6px; }
+.pane.solo { border-radius: 6px; margin: 8px 0 14px; }
+.pane pre { margin: 0; padding: 12px 72px 12px 14px; overflow-x: auto; font: 12.5px/1.55 ui-monospace, "Cascadia Mono", Consolas, monospace; }
+.pane code { background: transparent; padding: 0; font-size: inherit; }
+.pane .copy { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 2px 8px; background: var(--panel); }
+.op { border-top: 1px solid var(--line); margin-top: 22px; }
+.op details { margin: 6px 0; }
+@media (max-width: 900px) {
+  .docs { grid-template-columns: 1fr; }
+  .docs .toc { position: static; display: flex; flex-wrap: wrap; gap: 6px 14px; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+  .docs .toc b { flex: 0 0 100%; }
+}
