@@ -122,7 +122,7 @@ class Embedder:
         self.s = s
         self.store = store
         self.entries = face_entries(s.face_model, s.min_score)
-        self.key = f"{s.face_model}|{s.min_score}|{s.max_edge}"
+        self.key = f"{s.face_model}|{s.min_score}|{s.max_edge}|png"  # input format is part of the cache key
         self.client = httpx.Client(base_url=s.ml_url, timeout=s.http_timeout)
         self.calls = 0
 
@@ -143,7 +143,7 @@ class Embedder:
             r = self.client.post(
                 "/predict",
                 data={"entries": self.entries},
-                files={"image": ("image.jpg", prep.jpeg, "image/jpeg")},
+                files={"image": ("image.png", prep.encoded, "image/png")},  # exactly what the API sends (lossless)
             )
             if r.status_code != 200:
                 raise RuntimeError(f"ML server answered {r.status_code}")
