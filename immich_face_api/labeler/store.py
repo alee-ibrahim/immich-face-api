@@ -71,6 +71,14 @@ CREATE TABLE IF NOT EXISTS labeler_http_cache (
   content_type text,
   body bytea
 );
+-- curated names for people whose sources disagree (e.g. from a directory); applied by apply-overrides
+CREATE TABLE IF NOT EXISTS labeler_override (
+  person_id uuid PRIMARY KEY,
+  name text NOT NULL,
+  source text NOT NULL,
+  note text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS labeler_embedding_cache (
   image_sha256 text NOT NULL,
   settings text NOT NULL,
@@ -232,6 +240,10 @@ class Store:
             "UPDATE labeler_audit SET status = 'undone', undone_at = now(), undo_run_id = %s WHERE id = %s",
             (undo_run, audit_id),
         )
+
+    def overrides(self) -> dict[str, dict]:
+        cur = self.conn.execute("SELECT person_id::text, name, source, note FROM labeler_override")
+        return {r[0]: {"name": r[1], "source": r[2], "note": r[3]} for r in cur.fetchall()}
 
     def copy_pending(self, run_id: str, person_id: str, user_id: str, name: str) -> int:
         row = self.conn.execute(

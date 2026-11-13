@@ -75,6 +75,9 @@ def test_compatible_and_homonym_keys():
     assert compatible("Adbul Sattar", "Abdul Sattar")  # one typo per word
     assert compatible("Jane AbdulRahmaan", "Jane Abdul Rahman")  # joined words
     assert not compatible("Ali Riza", "Ali Rifau")
+    assert compatible("Abdul Salaam Ibrahim", "Abdulsalaam Ibrahim")
+    assert compatible("Abdul Ghani Abdul Hakeem", "Abdullganee Abdullhakeem")
+    assert not compatible("Ali Rifau", "Abdulla Rifau")
     assert clean_name("jane doe", RULES) == "Jane Doe" and clean_name("Jane doe", RULES) == "Jane Doe"
     assert clean_name("Jane McDoe", RULES) == "Jane McDoe"
     assert name_key("Mohamed Rasheed") == name_key("Mohamed Rashid")
@@ -583,3 +586,28 @@ def test_worklist_csv():
     out = worklist_csv(rows, props, "https://photos.example.org").splitlines()
     assert out[1].startswith("1,A,40,,,,https://photos.example.org/people/A")
     assert out[2].startswith("2,B,7,Jane Doe,low,HOLD: x,")
+
+
+def test_overrides_only_for_pure_name_conflicts_and_only_names_from_the_evidence():
+    from immich_face_api.labeler.cli import override_proposals
+
+    conflict = "HOLD: the sources disagree on the name (Aishtah Sheema)"
+    props = [
+        {"person_id": "A", "name": "Aminath Sheema", "evidence": ["name conflict: Aishtah Sheema", conflict]},
+        {
+            "person_id": "B",
+            "name": "Jane Doe",
+            "evidence": ["name conflict: J Doe", conflict, "HOLD: a namesake is about as close"],
+        },
+        {"person_id": "C", "name": "John Roe", "evidence": ["name conflict: Johnny", conflict]},
+        {"person_id": "D", "name": "Ann Lee", "evidence": ["x"]},
+    ]
+    ov = {
+        k: {"name": v, "source": "directory", "note": "unique match"}
+        for k, v in {"A": "Aishath Sheema", "B": "Jane Doe", "C": "Someone Else", "D": "Ann Lee"}.items()
+    }
+    out, c = override_proposals(props, ov)
+    assert [o["person_id"] for o in out] == ["A"] and out[0]["name"] == "Aishath Sheema"
+    assert not any(e.startswith("HOLD") for e in out[0]["evidence"])
+    assert out[0]["evidence"][-1] == "name decided by directory: unique match"
+    assert c == Counter(usable=1, not_only_a_name_conflict=2, name_not_among_the_evidence=1)

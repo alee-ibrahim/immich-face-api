@@ -106,12 +106,40 @@ def _close(a: str, b: str) -> bool:
     return any(long_[:i] + long_[i + 1 :] == short for i in range(len(long_)))
 
 
+def _variants(name: str) -> list[set[str]]:
+    """The name's tokens, and the same with any adjacent words written as one ("Abdul Salaam" ~ "Abdulsalaam",
+    "Abdul Ghani Abdul Hakeem" ~ "Abdulghani Abdulhakeem"). Names have few words, so all combinations are cheap."""
+    words = _words(name)
+    if not words or len(words) > 8:
+        return [name_tokens(name)]
+    out = []
+    for mask in range(1 << (len(words) - 1)):  # bit i set: word i is joined to word i + 1
+        parts = [words[0]]
+        for k in range(1, len(words)):
+            if mask >> (k - 1) & 1:
+                parts[-1] += words[k].lower()
+            else:
+                parts.append(words[k])
+        out.append(name_tokens(" ".join(parts)))
+    return [v for v in out if v]
+
+
+def _fits(short: set[str], long_: set[str]) -> bool:
+    return all(any(_close(x, y) for y in long_) for x in short)
+
+
 def compatible(a: str, b: str) -> bool:
     """Could ``a`` and ``b`` be spellings of the same person's name? Every token of the shorter one must appear in
-    the longer one (spelling-tolerant, one typo per token allowed): "Jabir" / "Abdulla Jabir" yes, "Adbul Sattar" /
-    "Abdul Sattar" yes, "Ali Rifau" / "Abdulla Rifau" no."""
-    ta, tb = name_tokens(a), name_tokens(b)
-    if not ta or not tb:
-        return False
-    short, long_ = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
-    return all(any(_close(x, y) for y in long_) for x in short)
+    the longer one (spelling-tolerant, one typo per token allowed; two adjacent words may be written as one):
+    "Jabir" / "Abdulla Jabir" yes, "Adbul Sattar" / "Abdul Sattar" yes, "Abdul Salaam" / "Abdulsalaam" yes,
+    "Ali Rifau" / "Abdulla Rifau" no."""
+    va, vb = _variants(a), _variants(b)
+    for i, ta in enumerate(va):
+        for j, tb in enumerate(vb):
+            short, long_ = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
+            if i == j == 0:
+                if _fits(short, long_):  # the words as written: one typo per word allowed
+                    return True
+            elif short <= long_:  # words joined: exact (spelling-folded) match only
+                return True
+    return False
