@@ -23,7 +23,7 @@ import asyncio
 import logging
 import struct
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -59,6 +59,8 @@ class Snapshot:
     names: list[str]
     signature: tuple
     loaded_at: float
+    centroids: np.ndarray | None = None  # (people, 512) float32, L2-normalised mean of each person's cached faces
+    index: dict[str, int] = field(default_factory=dict)  # person_id -> row of person_ids/names/centroids
 
     @property
     def faces(self) -> int:
@@ -81,8 +83,36 @@ def build(rows: list[tuple[str, str, object]], signature: tuple = ()) -> Snapsho
             names.append(name or "")
         person_idx[i] = ids[pid]
         vectors[i] = vector_from_pg(emb)
-    vectors = _normalise(vectors).astype(np.float16) if len(rows) else np.empty((0, DIM), dtype=np.float16)
-    return Snapshot(vectors, person_idx, list(ids), names, signature, time.time())
+    if len(rows):
+        vectors = _normalise(vectors)
+        sums = np.zeros((len(names), DIM), dtype=np.float32)
+        np.add.at(sums, person_idx, vectors)
+        centroids = _normalise(sums)
+        vectors = vectors.astype(np.float16)
+    else:
+        vectors = np.empty((0, DIM), dtype=np.float16)
+        centroids = np.empty((0, DIM), dtype=np.float32)
+    return Snapshot(vectors, person_idx, list(ids), names, signature, time.time(), centroids, dict(ids))
+
+
+def same_person_rule(snap: Snapshot | None, max_distance: float):
+    """``decide``'s same_person for a snapshot: two people (already known to share a name) are one person split over
+    several clusters when their centroids are within ``max_distance`` (cosine). 0 or no snapshot: never.
+
+    Why centroids: a split person's clusters are the same face, so their mean embeddings are close (measured on one
+    archive: most same-name split clusters within 0.5); namesakes are different faces (typically 0.8-1.1 apart).
+    Between the two, the faces may be one person or two lookalikes; keeping them apart (ambiguous) is the safe side."""
+    if snap is None or snap.centroids is None or max_distance <= 0:
+        return None
+    index = snap.index or {p: i for i, p in enumerate(snap.person_ids)}
+
+    def same(a: str, b: str) -> bool:
+        ia, ib = index.get(a), index.get(b)
+        if ia is None or ib is None:
+            return False
+        return float(1.0 - snap.centroids[ia] @ snap.centroids[ib]) <= max_distance
+
+    return same
 
 
 def search(snap: Snapshot, queries: list[str], k: int, chunk: int = 65536) -> list[list[Neighbour]]:

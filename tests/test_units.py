@@ -6,7 +6,7 @@ from PIL import Image
 
 from immich_face_api.config import ConfigError, Settings, parse_api_keys
 from immich_face_api.imaging import ImageRejected, prepare, sniff
-from immich_face_api.matching import Neighbour, decide, normalise_box
+from immich_face_api.matching import Neighbour, decide, name_key, normalise_box
 from immich_face_api.ml import MLError, face_entries, parse_faces
 from immich_face_api.security import ApiKeys, RateLimiter, hash_key
 
@@ -189,6 +189,47 @@ def test_ambiguous_and_tiebreak():
     assert d.ambiguous and d.best.person_id == "a" and len(d.candidates) == 1
     d = decide([n("a", 0.30), n("b", 0.30), n("b", 0.35)], max_distance=0.5, max_candidates=5, ambiguity_margin=0.0)
     assert d.best.person_id == "b"  # same distance, more votes
+
+
+def test_name_key():
+    assert name_key("  Jane  EXAMPLE ") == name_key("jane example") == name_key("Jane-Example.") == "jane example"
+    assert name_key(None) == name_key("") == ""
+    assert name_key("Ｊane Example") == "jane example"  # NFKC (full-width letter)
+
+
+def test_same_name_split_person_is_not_ambiguous():
+    rows = [n("a1", 0.204, "Jane Example"), n("a2", 0.231, "jane  example"), n("b", 0.40, "Other Person")]
+    kw = dict(max_distance=0.5, max_candidates=5, ambiguity_margin=0.03)
+    assert decide(rows, **kw).ambiguous  # no rule: two people
+    d = decide(rows, **kw, same_person=lambda a, b: True)
+    assert not d.ambiguous and d.best.person_id == "a1"
+    assert [c.person_id for c in d.candidates] == ["a1", "a2", "b"]  # candidates unchanged
+
+
+def test_homonyms_stay_ambiguous():
+    rows = [n("a1", 0.204, "Jane Example"), n("a2", 0.231, "Jane Example")]
+    kw = dict(max_distance=0.5, max_candidates=5, ambiguity_margin=0.03)
+    assert decide(rows, **kw, same_person=lambda a, b: False).ambiguous
+
+
+def test_split_person_does_not_hide_a_close_other_person():
+    rows = [n("a1", 0.20, "Jane Example"), n("a2", 0.21, "Jane Example"), n("b", 0.22, "Sam Example")]
+    kw = dict(max_distance=0.5, max_candidates=5, ambiguity_margin=0.03)
+    assert decide(rows, **kw, same_person=lambda a, b: True).ambiguous  # b is within the margin
+
+
+def test_same_person_only_asked_for_same_names():
+    asked = []
+
+    def same(a, b):
+        asked.append((a, b))
+        return True
+
+    rows = [n("a", 0.20, "Jane Example"), n("b", 0.21, "Sam Example")]
+    assert decide(rows, max_distance=0.5, max_candidates=5, ambiguity_margin=0.03, same_person=same).ambiguous
+    assert asked == []
+    rows = [n("a", 0.20, ""), n("b", 0.21, "")]  # unnamed (test mode): never merged
+    assert decide(rows, max_distance=0.5, max_candidates=5, ambiguity_margin=0.03, same_person=same).ambiguous
 
 
 def test_confidence():

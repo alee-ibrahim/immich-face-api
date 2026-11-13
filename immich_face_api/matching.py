@@ -14,10 +14,21 @@ have just been named with a handful of faces.
 
 ``ambiguous`` is set when the runner-up's best distance is within ``ambiguity_margin`` of the winner's: the
 website should then show the candidates instead of pre-selecting one.
+
+Split people: one person often has several Immich people (clusters) with the same name, e.g. clusters that were
+named one by one before anyone merged them. Two such candidates are not a choice between people, so they do not make
+a face ambiguous: the runner-up for the ambiguity check is the first candidate that is NOT the same person as the
+winner. Two candidates count as the same person when ``same_person(a, b)`` says so; the API's rule (see
+``facecache.same_person_rule``) is: same normalised name (``name_key``) AND the centroids of the two people's faces
+are within ``same_name_max_distance``. People who merely share a name (homonyms: different faces, far-apart
+centroids) stay separate, so a face between two namesakes is still ambiguous. The candidates list is unchanged.
 """
 
 from __future__ import annotations
 
+import re
+import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -48,9 +59,22 @@ class Decision:
     ambiguous: bool
 
 
+def name_key(name: str | None) -> str:
+    """Name for comparison: Unicode NFKC, case-folded, every run of non-letters/digits as one space."""
+    text = unicodedata.normalize("NFKC", name or "").casefold()
+    return " ".join(re.split(r"[\W_]+", text)).strip()
+
+
 def decide(
-    neighbours: list[Neighbour], *, max_distance: float, max_candidates: int, ambiguity_margin: float
+    neighbours: list[Neighbour],
+    *,
+    max_distance: float,
+    max_candidates: int,
+    ambiguity_margin: float,
+    same_person: Callable[[str, str], bool] | None = None,
 ) -> Decision:
+    """``same_person(person_id_a, person_id_b)``: True when two candidates are one person split over several Immich
+    people (only asked for candidates with the same ``name_key``). None: every person is someone else."""
     by_person: dict[str, list[Neighbour]] = {}
     for n in neighbours:
         if n.distance <= max_distance:
@@ -69,7 +93,16 @@ def decide(
     )
     if not ranked:
         return Decision(best=None, candidates=[], ambiguous=False)
-    ambiguous = len(ranked) > 1 and (ranked[1].distance - ranked[0].distance) <= ambiguity_margin
+    best = ranked[0]
+    best_key = name_key(best.name)
+
+    def other_person(c: Candidate) -> bool:
+        if same_person is None or not best_key or name_key(c.name) != best_key:
+            return True
+        return not same_person(best.person_id, c.person_id)
+
+    runner = next((c for c in ranked[1:] if other_person(c)), None)
+    ambiguous = runner is not None and (runner.distance - best.distance) <= ambiguity_margin
     return Decision(best=ranked[0], candidates=ranked[:max_candidates], ambiguous=ambiguous)
 
 

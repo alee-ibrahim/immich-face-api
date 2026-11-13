@@ -7,7 +7,7 @@ import numpy as np
 import psycopg
 import pytest
 
-from immich_face_api.facecache import DIM, FaceCache, build, search, vector_from_pg
+from immich_face_api.facecache import DIM, FaceCache, build, same_person_rule, search, vector_from_pg
 
 from .conftest import synthetic_jpeg
 from .test_app import AUTH, FACES, FakeDB, FakeML, make
@@ -53,6 +53,21 @@ def test_search_empty_and_no_queries():
     snap = build([])
     assert search(snap, ["[0.1]"], k=5) == [[]]
     assert search(build([("a", "A", pg_binary(np.ones(DIM)))]), [], k=5) == []
+
+
+def test_same_person_rule_uses_centroids():
+    rng = np.random.default_rng(3)
+    base, other = rng.normal(size=DIM), rng.normal(size=DIM)
+    rows = [("s1", "Jane Example", pg_binary(base + rng.normal(scale=0.3, size=DIM))) for _ in range(5)]
+    rows += [("s2", "Jane Example", pg_binary(base + rng.normal(scale=0.3, size=DIM))) for _ in range(3)]
+    rows += [("h", "Jane Example", pg_binary(other + rng.normal(scale=0.3, size=DIM))) for _ in range(4)]
+    snap = build(rows)
+    same = same_person_rule(snap, 0.6)
+    assert same("s1", "s2")  # one face split over two clusters
+    assert not same("s1", "h")  # a namesake: a different face
+    assert not same("s1", "missing")
+    assert same_person_rule(snap, 0.0) is None and same_person_rule(None, 0.6) is None
+    assert build([]).centroids.shape == (0, DIM)
 
 
 class SigDB:
@@ -116,3 +131,43 @@ async def test_db_timeout_is_503_with_retry_after(settings):
     assert r.status_code == 503 and r.json()["error"]["code"] == "busy" and r.headers["retry-after"] == "10"
     r = await c.get("/v1/people", headers=AUTH)
     assert r.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_identify_split_person_not_ambiguous_but_namesakes_are(settings):
+    """Two clusters of one person with the same name are not an ambiguity; two namesakes with different faces are."""
+    q = np.zeros(DIM, dtype=np.float32)
+    q[0] = 1.0
+    near_a = q.copy()
+    near_a[1] = 0.55  # distance ~0.13 from q
+    near_b = q.copy()
+    near_b[1] = 0.58  # ~0.14: within the 0.03 margin
+    far = np.zeros(DIM, dtype=np.float32)
+    far[2] = 1.0
+
+    class TwoDB(SigDB):
+        def __init__(self, rows):
+            super().__init__()
+            self.rows = rows
+
+        async def named_faces(self, per_person):
+            return self.rows
+
+    async def identify(rows):
+        app, c = make(settings)
+        st = app.state.face
+        st.faces = FaceCache(TwoDB(rows), per_person=10, refresh_seconds=60, knn=5)
+        await st.faces.refresh()
+        st.ml = FakeML([dataclasses.replace(FACES[0], embedding=json.dumps([float(x) for x in q]))])
+        r = await c.post("/v1/identify", headers=AUTH, content=synthetic_jpeg())
+        assert r.status_code == 200
+        return r.json()["faces"][0]
+
+    # split person: both clusters are the same face (centroids close)
+    split = [("s1", "Jane Example", pg_binary(near_a)), ("s2", "Jane Example", pg_binary(near_b))]
+    f = await identify(split)
+    assert f["name"] == "Jane Example" and f["ambiguous"] is False
+    # namesakes: s2's other faces put its centroid far away -> a different person, still ambiguous
+    namesakes = split + [("s2", "Jane Example", pg_binary(far))] * 3
+    f = await identify(namesakes)
+    assert f["ambiguous"] is True

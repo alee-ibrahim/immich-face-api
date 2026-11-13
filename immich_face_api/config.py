@@ -122,6 +122,8 @@ class Settings:
     face_cache_refresh_seconds: int = 300
     max_candidates: int = 5
     ambiguity_margin: float = 0.03
+    # same-name candidates whose centroids are this close are one (split) person, not an ambiguity; 0 = off
+    same_name_max_distance: float = 0.6
 
     # input limits
     max_upload_bytes: int = 15 * 1024 * 1024
@@ -230,6 +232,7 @@ class Settings:
             face_cache_refresh_seconds=_int("FACE_CACHE_REFRESH_SECONDS", 300, 10, 86_400),
             max_candidates=_int("MAX_CANDIDATES", 5, 1, 20),
             ambiguity_margin=_float("AMBIGUITY_MARGIN", 0.03, 0.0, 0.5),
+            same_name_max_distance=_float("SAME_NAME_MAX_DISTANCE", 0.6, 0.0, 2.0),
             max_upload_bytes=_int("MAX_UPLOAD_BYTES", 15 * 1024 * 1024, 1024, 100 * 1024 * 1024),
             max_pixels=_int("MAX_PIXELS", 50_000_000, 10_000, 200_000_000),
             api_keys=parse_api_keys(keys_text) if keys_text else {},

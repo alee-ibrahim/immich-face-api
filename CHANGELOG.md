@@ -5,6 +5,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed (same-name candidates)
+- A face whose two best candidates are **one person split over two Immich people with the same name** is no longer
+  `ambiguous`. Same normalised name and centroids within `FACE_API_SAME_NAME_MAX_DISTANCE` (0.6) = same person;
+  namesakes (different faces) stay ambiguous. Needs the face cache; the candidates list is unchanged.
+
 ### Added (request log and missed faces)
 - **Request log** in the admin store (on by default when a store is configured, 90 days): per identify call the app,
   status / error code, latency, image size, counts of matched, unknown, ambiguous and near-threshold faces, and per face
