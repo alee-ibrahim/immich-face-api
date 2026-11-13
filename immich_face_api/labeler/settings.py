@@ -61,6 +61,13 @@ class Thresholds:
     folder_max_faces: int = 3000  # sample bigger folders (by photo) to bound the work
     cluster_sample_faces: int = 200  # faces per candidate cluster used for the consistency check
     min_cluster_faces: int = 1  # clusters with fewer faces are ignored
+    # named-neighbour vote (named_people: true): unnamed clusters that are more clusters of an already-named person
+    vote_high_share: float = 0.9
+    vote_medium_share: float = 0.8
+    vote_low_share: float = 0.5
+    vote_max_median: float = 0.4
+    vote_unnamed_sample: int = 50  # faces per unnamed cluster
+    vote_named_sample: int = 300  # faces per named person
 
 
 @dataclass
@@ -90,28 +97,52 @@ class WebPage:
 
 @dataclass
 class WebSource:
-    """A listing page (one per language) with one card per person. ``card_pattern`` is a regex over the HTML with
-    named groups ``id`` and ``name`` (and ``image`` on the page of the primary language). Other named groups are
-    kept as details (e.g. a role)."""
+    """A source of (name, portrait) cards.
+
+    ``kind: "listing"``: a listing page (one per language) with one card per person. ``card_pattern`` is a regex over
+    the HTML with named groups ``id`` and ``name`` (or a ``name_template`` built from other groups) and ``image`` on
+    the page of the primary language; ``image_template`` (Python format string over the groups) builds the image URL,
+    e.g. for an archived page. ``alt_name_groups`` maps a language to a group holding the name in that language.
+    Other named groups are kept as details (e.g. a role).
+
+    ``kind: "wikidata"``: a SPARQL ``query`` for query.wikidata.org returning ``?item ?itemLabel ?image`` (optional
+    ``?<lang>Label`` for other languages, e.g. ``?dvLabel``, and ``?role``). The licence and author of every
+    Wikimedia Commons image are looked up and kept with the reference.
+
+    ``licence``: what the source's images may be used for (recorded in the report and audit)."""
 
     key: str
     label: str
-    pages: list[WebPage]
-    card_pattern: str
+    pages: list[WebPage] = field(default_factory=list)
+    card_pattern: str = ""
     primary_lang: str = "en"
-    regex: re.Pattern = field(init=False, repr=False)
+    kind: str = "listing"
+    query: str = ""
+    image_template: str = ""
+    name_template: str = ""
+    alt_name_groups: dict = field(default_factory=dict)
+    immutable: bool = False  # pages never change (archived snapshots): fetch once
+    licence: str = ""
+    regex: re.Pattern | None = field(init=False, repr=False, default=None)
 
     def __post_init__(self):
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", self.key):
             raise ConfigError(f"web source key {self.key!r}: use [A-Za-z0-9_.-]")
+        if self.kind == "wikidata":
+            if "?item" not in self.query or "?image" not in self.query:
+                raise ConfigError(f"web source {self.key}: a wikidata query must select ?item and ?image")
+            return
+        if self.kind != "listing":
+            raise ConfigError(f"web source {self.key}: kind must be listing or wikidata")
         self.pages = [p if isinstance(p, WebPage) else WebPage(**p) for p in self.pages]
         try:
             self.regex = re.compile(self.card_pattern, re.S)
         except re.error as exc:
             raise ConfigError(f"web source {self.key}: {exc}") from exc
-        for g in ("id", "name"):
-            if g not in self.regex.groupindex:
-                raise ConfigError(f"web source {self.key}: card_pattern needs a (?P<{g}>...) group")
+        if "id" not in self.regex.groupindex:
+            raise ConfigError(f"web source {self.key}: card_pattern needs a (?P<id>...) group")
+        if "name" not in self.regex.groupindex and not self.name_template:
+            raise ConfigError(f"web source {self.key}: card_pattern needs a (?P<name>...) group or a name_template")
         if self.primary_lang not in {p.lang for p in self.pages}:
             raise ConfigError(f"web source {self.key}: no page for primary language {self.primary_lang}")
 
@@ -134,6 +165,11 @@ class SourcesConfig:
     request_delay_seconds: float = 2.0
     page_refresh_hours: float = 168.0
     immich_web_url: str = ""  # for links in the report (the URL people open Immich with)
+    # people already named in Immich (by anyone) as references: finds the person's other, unnamed clusters
+    named_people: bool = False
+    # sources whose evidence may be WRITTEN ("folder", "named" or a web source key); others only propose (held).
+    # Unset = every source may be written.
+    write_sources: list[str] | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> SourcesConfig:
@@ -157,6 +193,8 @@ class SourcesConfig:
                 request_delay_seconds=float(data.get("request_delay_seconds", cls.request_delay_seconds)),
                 page_refresh_hours=float(data.get("page_refresh_hours", cls.page_refresh_hours)),
                 immich_web_url=data.get("immich_web_url", "").rstrip("/"),
+                named_people=bool(data.get("named_people", False)),
+                write_sources=data.get("write_sources"),
             )
         except TypeError as exc:
             raise ConfigError(f"config: {exc}") from exc

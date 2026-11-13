@@ -466,3 +466,120 @@ def test_run_is_a_dry_run_unless_bands_are_given():
     # regression: the band list must not be shadowed later in cmd_run (a Counter of proposals once was)
     src = inspect.getsource(cli.cmd_run)
     assert src.count("apply_bands =") == 1 and "bands =" not in src.replace("apply_bands =", "")
+
+
+# --- coverage: named-neighbour vote, source gate, more web source kinds, worklist
+
+
+def test_named_vote_finds_more_clusters_of_a_named_person():
+    from immich_face_api.labeler.match import named_vote
+
+    a, b = person(), person()
+    named = {"NA": np.stack([face_of(a) for _ in range(10)]), "NB": np.stack([face_of(b) for _ in range(10)])}
+    names = {"NA": "Jane Doe", "NB": "John Roe"}
+    unnamed = {"U1": np.stack([face_of(a) for _ in range(5)]), "U2": np.stack([face_of(person()) for _ in range(5)])}
+    (v,) = named_vote(unnamed, named, names, {"U1": 5, "U2": 5}, T)
+    assert v.person_id == "U1" and v.identity.name == "Jane Doe" and v.band == "high" and v.vote[:2] == (5, 5)
+    assert v.identity.refs[0].source == "named" and "named-neighbour vote" in v.evidence()[0]
+
+
+def test_unapproved_sources_are_held():
+    from immich_face_api.labeler.cli import hold_unapproved_sources
+
+    a, b = person(), person()
+    refs = [
+        ref("folder:a", "folder", "Jane Doe", a, 10, source="folder"),
+        ref("web:wd:Q1", "web", "John Roe", b, 1, source="wikidata"),
+    ]
+    ids = build_identities(refs, T)
+    fa = np.stack([face_of(a) for _ in range(6)])
+    fb = np.stack([face_of(b) for _ in range(6)])
+    clusters = [Cluster("A", 6, normalise(fa.mean(0))), Cluster("B", 6, normalise(fb.mean(0)))]
+    props = propose(clusters, ids, T, {"A": fa, "B": fb}, {})
+    n = hold_unapproved_sources(props, refs, ["folder"], clusters, T, {"A": fa, "B": fb}, {}, "")
+    by = {p.person_id: p for p in props}
+    assert n == 1 and not by["A"].hold and any("wikidata" in h for h in by["B"].hold)
+    assert hold_unapproved_sources(props, refs, None, clusters, T, {}, {}, "") == 0
+
+
+def test_listing_with_templates_and_alt_name_groups():
+    src = WebSource(
+        key="old",
+        label="old members",
+        pages=[{"url": "https://archive.example.org/old/members", "lang": "en"}],
+        card_pattern=r'<a href="/m/(?P<id>[a-z_]+)" title="(?P<dv>[^"]+) - (?P<area>[^"]+)"><img src="t\.php\?src=(?P<image>[^&"]+)',
+        name_template="{id}",
+        image_template="https://archive.example.org/im_/{image}",
+        alt_name_groups={"dv": "dv"},
+        licence="official site, archived",
+    )
+    page = '<a href="/m/jane_doe" title="ޖޭން - North"><img src="t.php?src=http://x.org/p/jane.jpg&w=24">'
+    (c,) = parse_cards(src, {"en": page})
+    assert c.name == "Jane Doe" and c.alt_names == {"dv": "ޖޭން"}
+    assert c.image_url == "https://archive.example.org/im_/http://x.org/p/jane.jpg"
+    assert c.details == {"area": "North", "licence": "official site, archived"}
+
+
+def test_wikidata_cards_record_licence():
+    import json as _json
+
+    from immich_face_api.labeler.web import wikidata_cards
+
+    class F:
+        def get(self, url, immutable, limit):
+            if "sparql" in url:
+                return _json.dumps(
+                    {
+                        "results": {
+                            "bindings": [
+                                {
+                                    "item": {"value": "http://www.wikidata.org/entity/Q1"},
+                                    "itemLabel": {"value": "Jane Doe"},
+                                    "image": {
+                                        "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Jane%20Doe.jpg"
+                                    },
+                                    "dvLabel": {"value": "ޖޭން"},
+                                },
+                                {
+                                    "item": {"value": "http://www.wikidata.org/entity/Q2"},
+                                    "itemLabel": {"value": "Q2"},
+                                    "image": {"value": "http://commons.wikimedia.org/wiki/Special:FilePath/x.jpg"},
+                                },
+                            ]
+                        }
+                    }
+                ).encode()
+            return _json.dumps(
+                {
+                    "query": {
+                        "pages": {
+                            "1": {
+                                "imageinfo": [
+                                    {
+                                        "extmetadata": {
+                                            "LicenseShortName": {"value": "CC BY-SA 4.0"},
+                                            "Artist": {"value": "<a href='x'>Someone</a>"},
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            ).encode()
+
+    src = WebSource(key="wd", label="wikidata", kind="wikidata", query="SELECT ?item ?image WHERE {}")
+    (c,) = wikidata_cards(src, F())
+    assert c.name == "Jane Doe" and c.alt_names == {"dv": "ޖޭން"}
+    assert c.details["licence"] == "CC BY-SA 4.0" and c.details["author"] == "Someone"
+    assert c.image_url.startswith("https://commons.wikimedia.org/wiki/Special:FilePath/Jane%20Doe.jpg")
+
+
+def test_worklist_csv():
+    from immich_face_api.labeler.report import worklist_csv
+
+    rows = [Cluster("A", 40, person()), Cluster("B", 7, person())]
+    props = {"B": {"name": "Jane Doe", "band": "low", "evidence": ["HOLD: x"]}}
+    out = worklist_csv(rows, props, "https://photos.example.org").splitlines()
+    assert out[1].startswith("1,A,40,,,,https://photos.example.org/people/A")
+    assert out[2].startswith("2,B,7,Jane Doe,low,HOLD: x,")

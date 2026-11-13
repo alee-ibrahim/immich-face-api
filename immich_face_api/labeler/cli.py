@@ -24,8 +24,8 @@ import numpy as np
 
 from .folders import folder_references, overlap
 from .immich import ImmichAPI, ImmichDB, ImmichError
-from .match import build_identities, held, merge_candidates, propose
-from .report import proposals_csv, proposals_html
+from .match import build_identities, held, merge_candidates, named_vote, propose
+from .report import proposals_csv, proposals_html, worklist_csv, worklist_html
 from .settings import ConfigError, LabelerSettings
 from .share_names import NameWriter, share_names, undo_copies
 from .store import Store, new_run_id
@@ -107,6 +107,57 @@ def _write_names(ctx: Context, run_id: str, source_run: str | None, owner: str, 
     return c
 
 
+def add_named_votes(ctx, owner, clusters, props, t, write_sources):
+    """Named-neighbour vote for the unnamed clusters; merged with the reference proposals: same name = more
+    evidence, different name = both held, no reference proposal = a new proposal (source "named")."""
+    named = [c for c in clusters if c.name and not c.hidden and not c.name.startswith("(")]
+    unnamed = [c for c in clusters if not c.name and not c.hidden and c.faces >= t.min_cluster_faces]
+    names = {c.person_id: c.name for c in named}
+    nsamp = ctx.db.samples(owner, [c.person_id for c in named], t.vote_named_sample) if named else {}
+    usamp = ctx.db.samples(owner, [c.person_id for c in unnamed], t.vote_unnamed_sample) if unnamed else {}
+    votes = named_vote(usamp, nsamp, names, {c.person_id: c.faces for c in clusters}, t)
+    by = {p.person_id: p for p in props}
+    st = Counter(votes=len(votes))
+    allowed = None if write_sources is None else set(write_sources)
+    for v in votes:
+        p = by.get(v.person_id)
+        if p is None:
+            if allowed is not None and "named" not in allowed:
+                v.hold.append("based on sources not yet approved for writing (named)")
+                st["vote_held_unapproved"] += 1
+            props.append(v)
+            st["vote_new"] += 1
+        elif p.identity.proposed_name == v.identity.name:
+            p.why_not_high = [w for w in p.why_not_high]  # unchanged band; the vote is extra evidence
+            p.vote_note = v.evidence()[0]
+            st["vote_agrees"] += 1
+        else:
+            p.hold.append(f"named-neighbour vote says {v.identity.name!r}")
+            st["vote_disagrees"] += 1
+    st.setdefault("vote_held_unapproved", 0)
+    rank = {"high": 0, "medium": 1, "low": 2}
+    props.sort(key=lambda p: (rank[p.band], -p.score, p.person_id))
+    return props, {f"named_{k}" if not k.startswith("vote") else k: n for k, n in st.items()}
+
+
+def hold_unapproved_sources(props, refs, write_sources, clusters, t, samples, ov, homonym_detail) -> int:
+    """With ``write_sources`` set, a proposal may be written only if the approved sources ALONE lead to the same
+    name for that person; anything else is held ("needs owner OK"). Returns how many were held for this reason."""
+    if write_sources is None:
+        return 0
+    allowed = set(write_sources)
+    approved = build_identities([r for r in refs if r.source in allowed], t, homonym_detail)
+    base = {p.person_id: p.identity.proposed_name for p in propose(clusters, approved, t, samples, ov)}
+    n = 0
+    for p in props:
+        if base.get(p.person_id) == p.identity.proposed_name:
+            continue
+        new = sorted({r.source for r in p.identity.refs if r.source not in allowed})
+        p.hold.append("based on sources not yet approved for writing (" + ", ".join(new or ["combination"]) + ")")
+        n += 1
+    return n
+
+
 def apply_bands_of(args) -> list[str]:
     """Bands `run` writes: only those given with --apply-band (none = dry run)."""
     return [b for b in (args.apply_band or []) if b in BANDS]
@@ -169,24 +220,32 @@ def cmd_run(s: LabelerSettings, args) -> int:
                 fetcher.close()
                 emb.close()
 
+        clusters = ctx.db.clusters(owner)
+        unnamed = [c for c in clusters if not c.name and not c.hidden]
+        stats["clusters"] = len(clusters)
+        stats["clusters_unnamed"] = len(unnamed)
+        stats["clusters_named"] = sum(bool(c.name) for c in clusters)
         refs = fres.refs + wrefs
         identities = build_identities(refs, t, s.sources.names.homonym_detail)
         stats["identities"] = len(identities)
         stats["identities_with_name_conflict"] = sum(bool(i.conflicts) for i in identities)
         stats["identities_homonym"] = sum(i.homonym for i in identities)
 
-        clusters = ctx.db.clusters(owner)
-        unnamed = [c for c in clusters if not c.name and not c.hidden]
-        stats["clusters"] = len(clusters)
-        stats["clusters_unnamed"] = len(unnamed)
-        stats["clusters_named"] = sum(bool(c.name) for c in clusters)
-
         cand: list[str] = []
         if unnamed and identities:
             dmin = (1.0 - np.stack([c.centroid for c in unnamed]) @ np.stack([i.centroid for i in identities]).T).min(1)
             cand = [c.person_id for c, d in zip(unnamed, dmin, strict=True) if d <= t.match_max_distance]
         samples = ctx.db.samples(owner, cand, t.cluster_sample_faces) if cand else {}
-        props = propose(clusters, identities, t, samples, overlap(fres.refs, fres.face_person))
+        ov = overlap(fres.refs, fres.face_person)
+        props = propose(clusters, identities, t, samples, ov)
+        held_new = hold_unapproved_sources(
+            props, refs, s.sources.write_sources, clusters, t, samples, ov, s.sources.names.homonym_detail
+        )
+        if s.sources.named_people:
+            props, vstats = add_named_votes(ctx, owner, clusters, props, t, s.sources.write_sources)
+            stats.update(vstats)
+            held_new += vstats["vote_held_unapproved"]
+        stats["proposals_needing_source_approval"] = held_new
         merges = merge_candidates(clusters, props, t)
         band_counts = Counter(p.band for p in props)
         for b in BANDS:
@@ -254,6 +313,46 @@ def cmd_apply(s: LabelerSettings, args) -> int:
         ctx.store.finish_run(run_id, "ok", stats)
         log.info("apply %s from %s: %s", run_id, source, dict(res))
         return 0
+    finally:
+        ctx.close()
+
+
+def cmd_worklist(s: LabelerSettings, args) -> int:
+    """The biggest unnamed people that the latest run will NOT name (no unheld high/medium proposal), for curators."""
+    ctx = Context(s)
+    run_id = new_run_id()
+    ctx.store.start_run(run_id, "worklist")
+    try:
+        owner = ctx.owner()
+        ctx.db.check(need_paths=False)
+        source = ctx.store.resolve_run("latest")
+        props = {p["person_id"]: p for p in ctx.store.proposals(source, list(BANDS))}
+        clusters = [c for c in ctx.db.clusters(owner) if not c.name and not c.hidden]
+        unnamed_faces = sum(c.faces for c in clusters)
+
+        def todo(c) -> bool:
+            p = props.get(c.person_id)
+            return not p or p["band"] == "low" or held(p["evidence"] or [])
+
+        rows = sorted((c for c in clusters if todo(c)), key=lambda c: (-c.faces, c.person_id))[: args.top]
+        thumbs = {c.person_id: ctx.api.thumbnail(c.person_id) for c in rows}
+        covered = sum(c.faces for c in rows)
+        stats = {
+            "source_run": source,
+            "unnamed_clusters": len(clusters),
+            "unnamed_faces": unnamed_faces,
+            "worklist_clusters": len(rows),
+            "worklist_faces": covered,
+            "worklist_share_of_unnamed_faces": round(covered / unnamed_faces, 3) if unnamed_faces else 0,
+        }
+        html = worklist_html(run_id, stats, rows, props, thumbs, s.sources.immich_web_url)
+        csv = worklist_csv(rows, props, s.sources.immich_web_url)
+        ctx.store.finish_run(run_id, "ok", stats, html, csv)
+        log.info("worklist %s: %s", run_id, stats)
+        return 0
+    except Exception as exc:
+        ctx.store.finish_run(run_id, "failed", {"error": f"{type(exc).__name__}: {exc}"})
+        raise
     finally:
         ctx.close()
 
@@ -372,6 +471,8 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("--run", nargs="*", help="apply/run (or share-names) run ids whose writes to revert")
     u.add_argument("--person", nargs="*", help="person ids to revert")
     u.add_argument("--copies", action="store_true", help="revert share-names copies instead of the owner's names")
+    wl = sub.add_parser("worklist", help="biggest unnamed people the latest run will not name (for curators)")
+    wl.add_argument("--top", type=int, default=200)
     sn = sub.add_parser("share-names", help="copy owner names into empty shared copies")
     sn.add_argument("--dry-run", action="store_true", help="count only, write nothing")
     e = sub.add_parser("export", help="write a stored report to a directory")
@@ -392,6 +493,7 @@ def main(argv: list[str] | None = None) -> int:
             "run": cmd_run,
             "apply": cmd_apply,
             "share-names": cmd_share_names,
+            "worklist": cmd_worklist,
             "undo": cmd_undo,
             "export": cmd_export,
             "status": cmd_status,

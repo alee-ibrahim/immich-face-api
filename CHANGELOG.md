@@ -5,6 +5,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added (labeler coverage)
+- Named-neighbour vote (`named_people`): more clusters of people already named in Immich.
+- `write_sources`: only approved sources are written; others are proposed and held.
+- Web sources: `kind: "wikidata"` (SPARQL, Commons licence recorded), `name_template`, `image_template`,
+  `alt_name_groups`, `immutable`, `licence`.
+- `worklist` command: the biggest unnamed people the labeler will not name, as an HTML/CSV worklist for curators.
+
 ### Fixed
 - Identify timed out once many people were named. The exact SQL search read every named face (about 4.4 s per
   detected face at 55,000 named faces), so group photos hit the statement timeout. Named faces are now cached in

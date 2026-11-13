@@ -514,6 +514,23 @@ the API: the API never writes; the labeler writes names only when told to, only 
 | **Folders** | Folders named after a person (`/photos/people/Jane Doe/...`, configurable regexes). In each folder, the person who appears in most photos (the *dominant identity*) is the reference. A folder where a second person appears almost as often is marked *ambiguous*. | The ones Immich already stored for those photos: nothing is recomputed, and the model is by definition Immich's. |
 | **Web pages** | A listing page with one card per person (name, portrait, optional details; one page per language joined by card id). Fetched one request at a time with a delay and a descriptive User-Agent, cached with ETag/Last-Modified; portraits are cached for good. | Immich's ML server (`POST /predict`) with exactly the request Immich and this API send. |
 
+More source kinds:
+
+- **Archived or older listing pages**: `name_template` / `image_template` build the name and image URL from card groups
+  (e.g. a name from a URL slug, an image through an archive's raw-image URL); `alt_name_groups` takes other-language
+  names from the same card; `immutable: true` fetches a snapshot once.
+- **Wikidata** (`"kind": "wikidata"`): a SPARQL query returning `?item ?itemLabel ?image` (optional `?dvLabel` etc.);
+  the Commons licence and author of every image are recorded with the reference.
+- **People already named in Immich** (`"named_people": true`): a face-level *named-neighbour vote* finds the other,
+  unnamed clusters of a named person: each sampled face of an unnamed cluster votes for the person of its nearest named
+  face (within `maxDistance`), as Immich itself assigns faces. Measured on one archive (leave one named cluster out):
+  267 right, 1 wrong at a vote share >= 0.8; no wrong vote for people with a single cluster. A vote that agrees with a
+  reference proposal is extra evidence; one that disagrees holds the proposal.
+
+**Which sources may be written** (`write_sources`, e.g. `["folder", "named", "members-2024"]`): a proposal is written
+only if the approved sources alone lead to the same name; anything else is held with "based on sources not yet
+approved for writing". So a new source can run in the report for a while before anyone lets it write.
+
 References whose centroids are close (or a bit less close with compatible names, for portraits taken years apart) are
 joined into one **identity**. Its name is the web spelling if there is one, otherwise the fullest folder name; other
 languages (e.g. a name in another script) are kept as `alt_names` for the report. Joined references whose names do not
@@ -591,6 +608,7 @@ python -m immich_face_api.labeler undo --run <apply-run>     # or --person <id> 
 python -m immich_face_api.labeler run --apply-band high     # nightly, once you trust the high band
 python -m immich_face_api.labeler share-names [--dry-run]   # owner names into empty shared copies (below)
 python -m immich_face_api.labeler undo --copies --run <share-names-run>   # or --person <id> ...
+python -m immich_face_api.labeler worklist --top 200        # biggest unnamed people the labeler will not name
 python -m immich_face_api.labeler status
 ```
 
