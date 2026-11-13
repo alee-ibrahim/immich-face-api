@@ -184,7 +184,7 @@ class State:
         t1 = time.perf_counter()
         m.INFLIGHT.inc()
         try:
-            faces = await state.ml.detect(img.jpeg)
+            faces = await state.ml.detect(img.encoded)
         except MLError as exc:
             m.ML_ERRORS.inc()
             log.warning("ml error", extra={"fields": {"rid": rid, "error": str(exc)}})

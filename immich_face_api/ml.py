@@ -63,12 +63,12 @@ class MLClient:
         except httpx.HTTPError:
             return False
 
-    async def detect(self, jpeg: bytes) -> list[DetectedFace]:
+    async def detect(self, image: bytes) -> list[DetectedFace]:
         try:
             r = await self.client.post(
                 "/predict",
                 data={"entries": self.entries},
-                files={"image": ("image.jpg", jpeg, "image/jpeg")},
+                files={"image": ("image.png", image, "image/png")},
             )
         except httpx.HTTPError as exc:
             raise MLError(f"ML server unreachable: {type(exc).__name__}") from exc
