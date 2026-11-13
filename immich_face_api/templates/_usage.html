@@ -13,6 +13,7 @@
 <div class="charts">
   <div class="panel"><h2>Requests per {{ bucket }}</h2>{{ c.requests | safe }}</div>
   <div class="panel"><h2>Match rate per {{ bucket }}</h2>{{ c.match | safe }}</div>
+  <div class="panel"><h2>Missed-face rate per {{ bucket }}</h2>{{ c.missed | safe }}</div>
   <div class="panel"><h2>Latency p95 per {{ bucket }}</h2>{{ c.p95 | safe }}</div>
 </div>
 
@@ -20,12 +21,12 @@
   <summary>Table view</summary>
   <div class="scroll"><table class="cards">
     <tr><th>{{ "Hour (UTC)" if bucket == "hour" else "Day (UTC)" }}</th><th class="num">Requests</th><th class="num">Faces</th>
-        <th class="num">Matched</th><th class="num">Match rate</th><th class="num">Errors</th><th class="num">p50</th><th class="num">p95</th></tr>
+        <th class="num">Matched</th><th class="num">Match rate</th><th class="num">Missed</th><th class="num">Errors</th><th class="num">p50</th><th class="num">p95</th></tr>
     {% for r in c.table %}
     <tr><td data-label="When">{{ r.label }}</td><td class="num" data-label="Requests">{{ "{:,}".format(r.requests) }}</td>
       <td class="num" data-label="Faces">{{ "{:,}".format(r.faces) }}</td><td class="num" data-label="Matched">{{ "{:,}".format(r.matched) }}</td>
-      <td class="num" data-label="Match rate">{{ pct(r.matched, r.faces) }}</td><td class="num" data-label="Errors">{{ r.errors }}</td>
+      <td class="num" data-label="Match rate">{{ pct(r.matched, r.faces) }}</td><td class="num" data-label="Missed">{{ pct(r.faces - r.matched, r.faces) }}</td><td class="num" data-label="Errors">{{ r.errors }}</td>
       <td class="num" data-label="p50">{{ r.p50 | ms }}</td><td class="num" data-label="p95">{{ r.p95 | ms }}</td></tr>
-    {% else %}<tr><td colspan="8" class="muted" data-label="">No requests in this period.</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="9" class="muted" data-label="">No requests in this period.</td></tr>{% endfor %}
   </table></div>
 </details>

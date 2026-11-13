@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Requests{% endblock %}
+{% block body %}
+<h1>Requests</h1>
+{% if purged in ("all", "crops") %}<div class="notice">{{ "The request log was deleted." if purged == "all" else "All face crops and embeddings were deleted." }} The action is in the audit list below.</div>
+{% elif purged == "unconfirmed" %}<div class="notice error">Nothing was deleted: type DELETE to confirm.</div>
+{% elif purged == "expired" %}<div class="notice error">The form expired; reload the page.</div>{% endif %}
+{% if not p.request_log %}<div class="notice">The request log is switched off (<code>FACE_API_REQUEST_LOG=false</code>); only hourly counts are kept. Older entries stay until their retention ends.</div>{% endif %}
+
+<form method="get" action="/requests" class="filters">
+  <select name="client" aria-label="App">
+    <option value="">All apps</option>
+    {% for name in clients %}<option value="{{ name }}" {{ 'selected' if name == f.client }}>{{ name }}</option>{% endfor %}
+  </select>
+  <label class="muted">from <input type="date" name="since" value="{{ f.since }}"></label>
+  <label class="muted">to <input type="date" name="until" value="{{ f.until }}"></label>
+  <select name="status" aria-label="Status">
+    <option value="">Any status</option>
+    <option value="ok" {{ 'selected' if f.status == 'ok' }}>OK</option>
+    <option value="error" {{ 'selected' if f.status == 'error' }}>Errors (4xx/5xx)</option>
+    {% for code in ("400", "413", "415", "429", "502", "503") %}<option {{ 'selected' if f.status == code }}>{{ code }}</option>{% endfor %}
+  </select>
+  <label class="check"><input type="checkbox" name="unknowns" value="1" {{ 'checked' if f.unknowns }}> has unknown faces</label>
+  <button class="ghost">Show</button>
+</form>
+
+<div class="scroll"><table class="cards">
+  <tr><th>When (UTC)</th><th>App</th><th>Status</th><th>Image</th><th class="num">Faces</th><th class="num">Matched</th>
+      <th class="num">Unknown</th><th class="num">Ambiguous</th><th>Names</th><th class="num">Latency</th><th></th></tr>
+  {% for r in rows %}
+  <tr>
+    <td data-label="When">{{ r.at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+    <td data-label="App">{{ r.client }}</td>
+    <td data-label="Status"><span class="chip {{ 'good' if r.status < 400 else 'bad' if r.status >= 500 else 'warn' }}">{{ r.status }}{% if r.error_code %} {{ r.error_code }}{% endif %}</span></td>
+    <td data-label="Image">{% if r.image_w %}{{ r.image_w }}×{{ r.image_h }} <span class="muted">{{ r.image_format or "" }}</span>{% endif %}{% if r.image_bytes %} <span class="muted">{{ "%.1f" | format(r.image_bytes / 1048576) }} MB</span>{% endif %}</td>
+    <td class="num" data-label="Faces">{{ r.faces }}</td>
+    <td class="num" data-label="Matched">{{ r.matched }}</td>
+    <td class="num" data-label="Unknown">{% if r.unknown %}<b>{{ r.unknown }}</b>{% else %}0{% endif %}</td>
+    <td class="num" data-label="Ambiguous">{{ r.ambiguous }}</td>
+    <td class="wrap names" data-label="Names">{% set ns = r.names or [] %}{{ ns[:4] | join(", ") or "—" }}{% if ns | length > 4 %} <span class="muted">+{{ ns | length - 4 }}</span>{% endif %}</td>
+    <td class="num" data-label="Latency">{{ r.latency_ms | ms }}</td>
+    <td data-label=""><a href="/requests/{{ r.id }}">details{% if r.crops %} · {{ r.crops }} crop{{ "s" if r.crops != 1 }}{% endif %}</a></td>
+  </tr>
+  {% else %}<tr><td colspan="11" class="muted" data-label="">No requests match.</td></tr>{% endfor %}
+</table></div>
+{% if next_before %}<p><a class="btn" href="/requests?client={{ f.client | urlencode }}&amp;since={{ f.since }}&amp;until={{ f.until }}&amp;status={{ f.status }}&amp;unknowns={{ '1' if f.unknowns }}&amp;before={{ next_before }}">Older</a></p>{% endif %}
+
+<h2>Stored data</h2>
+<div class="panel">
+  <ul class="facts">
+    <li>Request log: <b>{{ "on" if p.request_log else "off" }}</b>, kept {{ p.request_days }} days ·
+      {{ "{:,}".format(stats.requests) }} requests, {{ "{:,}".format(stats.faces) }} faces{% if stats.oldest_request %}, oldest {{ stats.oldest_request | ago }}{% endif %}</li>
+    <li>Face crops: <b>{{ p.crops }}</b>{% if p.crops != "none" %} ({{ p.crop_size }} px JPEG + embedding), kept {{ p.crop_days }} days{% endif %} ·
+      {{ "{:,}".format(stats.crops) }} stored ({{ "%.1f" | format(stats.crop_bytes / 1048576) }} MB){% if stats.oldest_crop %}, oldest {{ stats.oldest_crop | ago }}{% endif %}</li>
+    <li>At most {{ p.max_faces }} faces per request are logged. The uploaded photo is never stored. Crops and embeddings are biometric data; see <a href="/docs#privacy">Docs → Privacy</a>.</li>
+  </ul>
+  <form method="post" action="/privacy/purge" class="row" data-confirm="Delete this data now? This cannot be undone.">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Delete
+      <select name="scope">
+        <option value="crops">all face crops and embeddings</option>
+        <option value="all">the whole request log (requests, faces, crops)</option>
+      </select></label>
+    <label>Type DELETE to confirm<input type="text" name="confirm" required pattern="DELETE" autocomplete="off"></label>
+    <button class="danger">Delete now</button>
+  </form>
+</div>
+
+<h2>Privacy actions</h2>
+<div class="scroll"><table class="cards">
+  <tr><th>When</th><th>Who</th><th>What</th><th>Deleted</th></tr>
+  {% for a in audit %}
+  <tr><td data-label="When">{{ a.at | ago }}</td><td data-label="Who">{{ a.actor }}</td><td data-label="What">{{ a.action }} ({{ a.detail.scope }})</td>
+    <td data-label="Deleted">{% if a.detail.scope == "all" %}{{ a.detail.requests }} requests, {{ a.detail.faces }} faces{% else %}{{ a.detail.crops }} crops{% endif %}</td></tr>
+  {% else %}<tr><td colspan="4" class="muted" data-label="">Nothing yet.</td></tr>{% endfor %}
+</table></div>
+<script src="/static/confirm.js"></script>
+{% endblock %}

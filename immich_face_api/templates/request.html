@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% from "_face.html" import face_card with context %}
+{% block title %}Request{% endblock %}
+{% block body %}
+<p><a href="/requests">← Requests</a></p>
+{% if not req %}
+<h1>Request not found</h1>
+<p class="muted">It may have expired (kept {{ p.request_days }} days) or been deleted.</p>
+{% else %}
+<h1>Request {{ req.id }}</h1>
+<div class="grid">
+  <div class="panel stat"><div class="n">{{ req.faces }}</div><div class="l">faces detected</div></div>
+  <div class="panel stat"><div class="n">{{ req.matched }}</div><div class="l">matched</div></div>
+  <div class="panel stat"><div class="n">{{ req.unknown }}</div><div class="l">unknown</div></div>
+  <div class="panel stat"><div class="n">{{ req.ambiguous }}</div><div class="l">ambiguous</div></div>
+  <div class="panel stat"><div class="n">{{ req.near }}</div><div class="l">near threshold</div></div>
+  <div class="panel stat"><div class="n">{{ req.latency_ms | ms }}</div><div class="l">latency</div></div>
+</div>
+<table class="kv">
+  <tr><td>When (UTC)</td><td>{{ req.at.strftime("%Y-%m-%d %H:%M:%S") }} <span class="muted">({{ req.at | ago }})</span></td></tr>
+  <tr><td>App</td><td>{{ req.client }}</td></tr>
+  <tr><td>Status</td><td><span class="chip {{ 'good' if req.status < 400 else 'bad' if req.status >= 500 else 'warn' }}">{{ req.status }}{% if req.error_code %} {{ req.error_code }}{% endif %}</span></td></tr>
+  <tr><td>Image</td><td>{% if req.image_w %}{{ req.image_w }}×{{ req.image_h }} {{ req.image_format or "" }}{% else %}—{% endif %}{% if req.image_bytes %}, {{ "%.2f" | format(req.image_bytes / 1048576) }} MB{% endif %} <span class="muted">(the photo itself is not stored)</span></td></tr>
+  <tr><td>Request id</td><td><code>{{ req.rid }}</code> <span class="muted">(X-Request-Id, also in the service log)</span></td></tr>
+</table>
+{% if req.faces > faces | length %}<p class="muted">Only the first {{ faces | length }} of {{ req.faces }} faces are logged (limit {{ p.max_faces }} per request).</p>{% endif %}
+<h2>Faces, left to right</h2>
+{% if faces %}
+<div class="faces">
+  {% for f in faces %}{{ face_card(f, p) }}{% endfor %}
+</div>
+{% else %}<p class="muted">No faces{% if req.status >= 400 %} (the request failed){% endif %}.</p>{% endif %}
+{% endif %}
+{% endblock %}

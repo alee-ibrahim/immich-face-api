@@ -15,6 +15,8 @@
     {% set here = request.url.path %}
     <a href="/" class="{{ 'on' if here == '/' }}">Dashboard</a>
     <a href="/usage" class="{{ 'on' if here.startswith('/usage') }}">Usage</a>
+    <a href="/requests" class="{{ 'on' if here.startswith('/requests') }}">Requests</a>
+    <a href="/missed" class="{{ 'on' if here.startswith('/missed') or here.startswith('/faces') }}">Missed faces</a>
     <a href="/keys" class="{{ 'on' if here.startswith('/keys') }}">Apps &amp; keys</a>
     <a href="/try" class="{{ 'on' if here.startswith('/try') }}">Try it</a>
     <a href="/docs" class="{{ 'on' if here.startswith('/docs') }}">Docs</a>

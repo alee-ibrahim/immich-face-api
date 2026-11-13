@@ -1,8 +1,9 @@
 """Optional admin UI (``python -m immich_face_api admin``, port FACE_API_ADMIN_PORT, default 8081).
 
 Server-rendered (Jinja2), no JavaScript build and nothing from a CDN. Pages: dashboard (usage over time), apps and
-API keys (create - the key is shown once - and revoke), usage per app, and "Try it" (upload a photo, see boxes and
-names; nothing is stored or counted). Sign-in: any OpenID Connect provider (FACE_API_OIDC_*), optionally limited to a
+API keys (create - the key is shown once - and revoke), usage per app, the request log ("Requests") and "Missed faces"
+(unknown, ambiguous and near-threshold faces with their crops, if crops are stored), and "Try it" (upload a photo, see
+boxes and names; nothing is stored or counted). Face crops are served only by these signed-in routes, never cached. Sign-in: any OpenID Connect provider (FACE_API_OIDC_*), optionally limited to a
 claim value (FACE_API_OIDC_ADMIN_CLAIM / _VALUES); without OIDC, a bootstrap admin token (local use). Every form and
 the try-it call carry a per-session CSRF token. Run it on its own port and never route it publicly.
 """
@@ -17,7 +18,7 @@ import logging
 import re
 import secrets
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from importlib.resources import files
 from typing import Annotated
 
@@ -33,6 +34,7 @@ from .app import HttpError, State, extract_image, read_body
 from .charts import bar_chart, line_chart
 from .config import ConfigError, Settings
 from .openapi import OPENAPI_SPEC
+from .requestlog import embedding_text
 from .store import series, since_for, totals
 from .usage import percentile
 
@@ -124,6 +126,7 @@ def charts(rows: list[dict], start: datetime, bucket: str) -> dict:
     req = [c.requests for _, c in pts]
     p95 = [percentile(c.latency_hist, 0.95) for _, c in pts]
     match = [(100 * c.matched / c.faces) if c.faces else None for _, c in pts]
+    missed = [(100 * (c.faces - c.matched) / c.faces) if c.faces else None for _, c in pts]
     table = [
         {
             "t": t,
@@ -142,6 +145,7 @@ def charts(rows: list[dict], start: datetime, bucket: str) -> dict:
         "requests": bar_chart(labels, req, unit="requests", title="Requests"),
         "p95": line_chart(labels, p95, unit="ms", title="Latency p95", fmt=lambda v: ms(v)),
         "match": line_chart(labels, match, unit="%", title="Match rate", fmt=lambda v: f"{v:.0f}%", y_max=100),
+        "missed": line_chart(labels, missed, unit="%", title="Missed-face rate", fmt=lambda v: f"{v:.0f}%", y_max=100),
         "table": table,
     }
 
@@ -240,6 +244,7 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
                 "oidc": settings.oidc_enabled,
                 "version": __version__,
                 "ready": app.state.face.ready,
+                "person_url": person_url,
                 **ctx,
             },
             status_code=status,
@@ -330,6 +335,9 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
         start, bucket = since_for(range_)
         rows = await st.store.usage(start, client)
         by_client = await st.store.usage_by_client(start) if client is None else []
+        for a in by_client:
+            a["unknown"] = a["faces"] - a["matched"]
+        top_unknown = sorted((a for a in by_client if a["unknown"]), key=lambda a: -a["unknown"])[:10]
         return render(
             request,
             template,
@@ -339,7 +347,9 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
             s=summary(rows),
             c=charts(rows, start, bucket),
             by_client=by_client,
+            top_unknown=top_unknown,
             bucket=bucket,
+            log_on=settings.request_log,
         )
 
     @app.get("/")
@@ -360,7 +370,7 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
             status,
             keys=await st.store.list_keys(),
             env_clients=sorted(settings.api_keys),
-            audit=await st.store.audit(20),
+            audit=await st.store.audit(20, "key."),
             default_rate=settings.rate_limit_per_minute,
             **ctx,
         )
@@ -422,6 +432,176 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
         log.info("api key revoked", extra={"fields": {"id": key_id, "by": u["id"], "ok": ok}})
         return RedirectResponse("/keys", 303)
 
+    # ------------------------------------------------------------------ request log, missed faces, crops
+
+    def day(value: str) -> datetime | None:
+        try:
+            return datetime.combine(date.fromisoformat(value), datetime.min.time(), UTC) if value else None
+        except ValueError:
+            return None
+
+    def int_or_none(value: str) -> int | None:
+        return int(value) if value.isdigit() and len(value) < 19 else None
+
+    def privacy() -> dict:
+        return {
+            "request_log": settings.request_log,
+            "request_days": settings.request_log_retention_days,
+            "crops": settings.store_crops,
+            "crop_days": settings.crop_retention_days,
+            "crop_size": settings.crop_size,
+            "max_faces": settings.log_max_faces,
+            "near_margin": settings.near_margin,
+            "max_distance": settings.max_distance,
+        }
+
+    def person_url(person_id: str | None) -> str:
+        return f"{settings.immich_url}/people/{person_id}" if settings.immich_url and person_id else ""
+
+    @app.get("/requests")
+    async def requests_page(
+        request: Request,
+        u: User,
+        client: str = "",
+        since: str = "",
+        until: str = "",
+        unknowns: str = "",
+        status: str = "",
+        before: str = "",
+        purged: str = "",
+    ):
+        st: State = app.state.face
+        status = status if status in ("ok", "error") or re.fullmatch(r"[1-5]\d\d", status) else ""
+        to = day(until)
+        rows = await st.store.list_requests(
+            client=client or None,
+            since=day(since),
+            until=to + timedelta(days=1) if to else None,
+            unknowns=unknowns == "1",
+            status=status or None,
+            before=int_or_none(before),
+            limit=50,
+        )
+        return render(
+            request,
+            "requests.html",
+            rows=rows,
+            clients=await st.store.log_clients(),
+            f={"client": client, "since": since, "until": until, "unknowns": unknowns == "1", "status": status},
+            next_before=rows[-1]["id"] if len(rows) == 50 else None,
+            stats=await st.store.log_stats(),
+            audit=await st.store.audit(10, "log."),
+            p=privacy(),
+            purged=purged,
+        )
+
+    @app.get("/requests/{request_id}")
+    async def request_detail(request: Request, u: User, request_id: str):
+        rid = int_or_none(request_id)
+        req, faces = await app.state.face.store.get_request(rid) if rid else (None, [])
+        if not req:
+            return render(request, "request.html", 404, req=None, faces=[], p=privacy())
+        return render(request, "request.html", req=req, faces=faces, p=privacy())
+
+    @app.get("/missed")
+    async def missed_page(
+        request: Request,
+        u: User,
+        client: str = "",
+        since: str = "",
+        until: str = "",
+        kind: str = "",
+        before: str = "",
+    ):
+        st: State = app.state.face
+        kinds = (kind,) if kind in ("unknown", "ambiguous", "near") else ("unknown", "ambiguous", "near")
+        to = day(until)
+        rows = await st.store.missed_faces(
+            client=client or None,
+            since=day(since),
+            until=to + timedelta(days=1) if to else None,
+            kinds=kinds,
+            before=int_or_none(before),
+            limit=60,
+        )
+        return render(
+            request,
+            "missed.html",
+            rows=rows,
+            clients=await st.store.log_clients(),
+            f={"client": client, "since": since, "until": until, "kind": kind if len(kinds) == 1 else ""},
+            next_before=rows[-1]["id"] if len(rows) == 60 else None,
+            p=privacy(),
+        )
+
+    @app.get("/crops/{name}")
+    async def crop(u: User, name: str):
+        """A face crop: signed-in admins only, never cached, never on the API port."""
+        found = re.fullmatch(r"(\d{1,18})\.jpg", name)
+        data = await app.state.face.store.crop(int(found.group(1))) if found else None
+        if data is None:
+            return Response(status_code=404, headers={"Cache-Control": "no-store"})
+        return Response(
+            data,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "no-store, private, max-age=0",
+                "Pragma": "no-cache",
+                "Content-Disposition": "inline",
+                "Cross-Origin-Resource-Policy": "same-origin",
+            },
+        )
+
+    @app.get("/faces/{face_id}/similar")
+    async def similar(request: Request, u: User, face_id: str):
+        """Nearest Immich people (named or not) for a logged face, from its stored embedding."""
+        st: State = app.state.face
+        fid = int_or_none(face_id)
+        face = await st.store.face(fid) if fid else None
+        if not face:
+            return render(request, "similar.html", 404, face=None, unnamed=[], named=[], error="No such face.")
+        people, error = [], ""
+        if face["embedding"] is None:
+            error = "This face has no stored embedding (crops are off, or the crop has expired)."
+        elif not st.ready:
+            error = "The Immich database is not reachable right now: " + st.reason
+        else:
+            try:
+                people = await st.db.similar_people(
+                    embedding_text(bytes(face["embedding"])), probes=settings.similar_probes
+                )
+            except Exception as exc:  # noqa: BLE001 - shown to the admin, not raised
+                log.warning("similar search failed", extra={"fields": {"error": type(exc).__name__}})
+                error = "The search in Immich failed or timed out (the database may be busy); try again later."
+        face.pop("embedding", None)
+        return render(
+            request,
+            "similar.html",
+            face=face,
+            unnamed=[x for x in people if not x["name"]],
+            named=[x for x in people if x["name"]],
+            error=error,
+            immich=settings.immich_url,
+            p=privacy(),
+        )
+
+    @app.post("/privacy/purge")
+    async def purge(
+        request: Request,
+        u: User,
+        csrf: Annotated[str, Form()],
+        scope: Annotated[str, Form()] = "",
+        confirm: Annotated[str, Form()] = "",
+    ):
+        try:
+            check_csrf(request, csrf)
+        except HttpError:
+            return RedirectResponse("/requests?purged=expired", 303)
+        if scope not in ("all", "crops") or confirm.strip() != "DELETE":
+            return RedirectResponse("/requests?purged=unconfirmed", 303)
+        await app.state.face.store.purge_all(scope, u["id"])
+        return RedirectResponse(f"/requests?purged={scope}", 303)
+
     # ------------------------------------------------------------------ docs
 
     def docs_base(request: Request) -> str:
@@ -448,7 +628,7 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/docs")
     async def docs(request: Request, u: User):
-        return render(request, "docs.html", base=docs_base(request), lim=limits())
+        return render(request, "docs.html", base=docs_base(request), lim=limits(), p=privacy())
 
     @app.get("/docs/reference")
     async def docs_reference(request: Request, u: User):

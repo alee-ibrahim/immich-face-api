@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import io
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from PIL import Image, ImageOps
 
@@ -42,6 +42,8 @@ class PreparedImage:
     sent_width: int  # size of the image sent to ML (boxes are relative to it)
     sent_height: int
     source_format: str
+    # the clean RGB pixels that were sent (for face crops of the request log); not part of equality or repr
+    image: Image.Image | None = field(default=None, compare=False, repr=False)
 
 
 def sniff(data: bytes) -> str | None:
@@ -126,4 +128,5 @@ def prepare(data: bytes, *, max_bytes: int, max_pixels: int, max_edge: int) -> P
         sent_width=clean.width,
         sent_height=clean.height,
         source_format=img.format or kind,
+        image=clean,
     )

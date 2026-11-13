@@ -1,4 +1,5 @@
-"""The service's own small PostgreSQL ("store"): API keys created in the admin UI and hourly usage aggregates.
+"""The service's own small PostgreSQL ("store"): API keys made in the admin UI, hourly usage aggregates and, if enabled,
+the request log with optional face crops (see requestlog.py).
 
 It is optional (``FACE_API_STORE_URL``). It is never Immich's database; Immich stays read-only. Keys look like
 ``ifa_<prefix>_<secret>``: the prefix is stored in clear (so the UI can show which key is which and lookups use an
@@ -198,22 +199,45 @@ class Store:
             self._used |= used
             raise
 
-    async def purge(self, retention_days: int) -> None:
-        if self._last_purge is not None and time.monotonic() - self._last_purge < 6 * 3600:
-            return
+    async def purge(
+        self, retention_days: int, request_days: int | None = None, crop_days: int | None = None, force: bool = False
+    ) -> dict:
+        """Retention, at most every 6 hours per process: usage rows, request log (faces go with their request) and
+        crops + embeddings (the face rows stay until their request expires). Returns what was deleted."""
+        if not force and self._last_purge is not None and time.monotonic() - self._last_purge < 6 * 3600:
+            return {}
+        out = {}
         async with self.pool.connection() as conn:
-            await conn.execute(
+            cur = await conn.execute(
                 "DELETE FROM usage_hourly WHERE hour < now() - make_interval(days => %s)", (retention_days,)
             )
+            out["usage_rows"] = cur.rowcount
+            if request_days is not None:
+                cur = await conn.execute(
+                    "DELETE FROM request_log WHERE at < now() - make_interval(days => %s)", (request_days,)
+                )
+                out["requests"] = cur.rowcount
+            if crop_days is not None:
+                cur = await conn.execute(
+                    "UPDATE face_log SET crop = NULL, embedding = NULL "
+                    "WHERE crop IS NOT NULL AND at < now() - make_interval(days => %s)",
+                    (crop_days,),
+                )
+                out["crops"] = cur.rowcount
         self._last_purge = time.monotonic()
+        if any(out.values()):
+            log.info("store retention purge", extra={"fields": out})
+        return out
 
-    async def flush_loop(self, retention_days: int, interval: float = 30.0) -> None:
+    async def flush_loop(
+        self, retention_days: int, interval: float = 30.0, request_days: int | None = None, crop_days: int | None = None
+    ) -> None:
         while True:
             await asyncio.sleep(interval)
             try:
                 await self.ensure_migrated()
                 await self.flush()
-                await self.purge(retention_days)
+                await self.purge(retention_days, request_days, crop_days)
             except Exception as exc:  # noqa: BLE001 - keep counting in memory, try again later
                 log.warning("store flush failed", extra={"fields": {"error": type(exc).__name__}})
 
@@ -273,13 +297,232 @@ class Store:
                 )
             ).fetchall()
 
-    async def audit(self, limit: int = 50) -> list[dict]:
+    async def audit(self, limit: int = 50, prefix: str = "") -> list[dict]:
         async with self.pool.connection() as conn:
             return await (
                 await conn.execute(
-                    "SELECT at, actor, action, detail FROM audit_log ORDER BY id DESC LIMIT %s", (limit,)
+                    "SELECT at, actor, action, detail FROM audit_log WHERE action LIKE %s ORDER BY id DESC LIMIT %s",
+                    (prefix.replace("%", "") + "%", limit),
                 )
             ).fetchall()
+
+    async def audit_event(self, actor: str, action: str, detail: dict) -> None:
+        async with self.pool.connection() as conn:
+            await self._audit(conn, actor, action, detail)
+
+    # ---------------------------------------------------------------- request log (requestlog.py)
+
+    async def insert_requests(self, records: list) -> None:
+        """Write RequestRecords, each with its faces, in one transaction."""
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                for r in records:
+                    row = await (
+                        await conn.execute(
+                            """
+                            INSERT INTO request_log (at, rid, client, endpoint, status, error_code, latency_ms,
+                                image_bytes, image_w, image_h, image_format, faces, matched, unknown, ambiguous, near)
+                            VALUES (to_timestamp(%s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            RETURNING id, at
+                            """,
+                            (
+                                r.at,
+                                r.rid[:64],
+                                r.client[:64],
+                                r.endpoint[:64],
+                                r.status,
+                                r.error_code,
+                                r.latency_ms,
+                                r.image_bytes,
+                                r.image_w,
+                                r.image_h,
+                                r.image_format,
+                                r.faces,
+                                r.matched,
+                                r.unknown,
+                                r.ambiguous,
+                                r.near,
+                            ),
+                        )
+                    ).fetchone()
+                    if not r.face_records:
+                        continue
+                    async with conn.cursor() as cur:
+                        await cur.executemany(
+                            """
+                            INSERT INTO face_log (request_id, at, client, idx, kind, box, detection_score, person_id,
+                                name, distance, candidates, crop, embedding)
+                            VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                            """,
+                            [
+                                (
+                                    row["id"],
+                                    row["at"],
+                                    r.client[:64],
+                                    f.idx,
+                                    f.kind,
+                                    json.dumps(f.box),
+                                    f.detection_score,
+                                    f.person_id,
+                                    f.name,
+                                    f.distance,
+                                    json.dumps(f.candidates),
+                                    f.crop,
+                                    f.embedding,
+                                )
+                                for f in r.face_records
+                            ],
+                        )
+
+    async def list_requests(
+        self,
+        *,
+        client: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        unknowns: bool = False,
+        status: str | None = None,
+        before: int | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Newest first. status: None, 'ok' (< 400), 'error' (>= 400) or an exact code such as '503'."""
+        params = {
+            "client": client,
+            "since": since,
+            "until": until,
+            "unknowns": unknowns,
+            "status": status,
+            "before": before,
+            "limit": limit,
+        }
+        async with self.pool.connection() as conn:
+            return await (
+                await conn.execute(
+                    """
+                    SELECT r.*,
+                           (SELECT array_agg(f.name ORDER BY f.idx) FROM face_log f
+                            WHERE f.request_id = r.id AND f.name IS NOT NULL) AS names,
+                           (SELECT count(*) FROM face_log f WHERE f.request_id = r.id AND f.crop IS NOT NULL) AS crops
+                    FROM request_log r
+                    WHERE (%(client)s::text IS NULL OR r.client = %(client)s)
+                      AND (%(since)s::timestamptz IS NULL OR r.at >= %(since)s)
+                      AND (%(until)s::timestamptz IS NULL OR r.at < %(until)s)
+                      AND (NOT %(unknowns)s OR r.unknown > 0)
+                      AND (%(status)s::text IS NULL
+                           OR (%(status)s = 'ok' AND r.status < 400)
+                           OR (%(status)s = 'error' AND r.status >= 400)
+                           OR r.status::text = %(status)s)
+                      AND (%(before)s::bigint IS NULL OR r.id < %(before)s)
+                    ORDER BY r.id DESC LIMIT %(limit)s
+                    """,
+                    params,
+                )
+            ).fetchall()
+
+    async def get_request(self, request_id: int) -> tuple[dict | None, list[dict]]:
+        async with self.pool.connection() as conn:
+            req = await (await conn.execute("SELECT * FROM request_log WHERE id = %s", (request_id,))).fetchone()
+            if not req:
+                return None, []
+            faces = await (
+                await conn.execute(
+                    "SELECT id, idx, kind, box, detection_score, person_id, name, distance, candidates, "
+                    "crop IS NOT NULL AS has_crop, embedding IS NOT NULL AS has_embedding "
+                    "FROM face_log WHERE request_id = %s ORDER BY idx",
+                    (request_id,),
+                )
+            ).fetchall()
+        return req, faces
+
+    async def missed_faces(
+        self,
+        *,
+        client: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        kinds: tuple[str, ...] = ("unknown", "ambiguous", "near"),
+        before: int | None = None,
+        limit: int = 60,
+    ) -> list[dict]:
+        """Unknown, ambiguous and near-threshold faces, newest first."""
+        async with self.pool.connection() as conn:
+            return await (
+                await conn.execute(
+                    """
+                    SELECT f.id, f.request_id, f.at, f.client, f.idx, f.kind, f.detection_score, f.person_id, f.name,
+                           f.distance, f.candidates, f.crop IS NOT NULL AS has_crop,
+                           f.embedding IS NOT NULL AS has_embedding
+                    FROM face_log f
+                    WHERE f.kind <> 'matched' AND f.kind = ANY(%(kinds)s)
+                      AND (%(client)s::text IS NULL OR f.client = %(client)s)
+                      AND (%(since)s::timestamptz IS NULL OR f.at >= %(since)s)
+                      AND (%(until)s::timestamptz IS NULL OR f.at < %(until)s)
+                      AND (%(before)s::bigint IS NULL OR f.id < %(before)s)
+                    ORDER BY f.id DESC LIMIT %(limit)s
+                    """,
+                    {
+                        "kinds": list(kinds),
+                        "client": client,
+                        "since": since,
+                        "until": until,
+                        "before": before,
+                        "limit": limit,
+                    },
+                )
+            ).fetchall()
+
+    async def face(self, face_id: int) -> dict | None:
+        async with self.pool.connection() as conn:
+            return await (
+                await conn.execute(
+                    "SELECT id, request_id, at, client, kind, person_id, name, distance, candidates, "
+                    "crop IS NOT NULL AS has_crop, embedding FROM face_log WHERE id = %s",
+                    (face_id,),
+                )
+            ).fetchone()
+
+    async def crop(self, face_id: int) -> bytes | None:
+        async with self.pool.connection() as conn:
+            row = await (await conn.execute("SELECT crop FROM face_log WHERE id = %s", (face_id,))).fetchone()
+        return bytes(row["crop"]) if row and row["crop"] is not None else None
+
+    async def log_clients(self) -> list[str]:
+        async with self.pool.connection() as conn:
+            rows = await (await conn.execute("SELECT DISTINCT client FROM request_log ORDER BY 1")).fetchall()
+        return [r["client"] for r in rows]
+
+    async def log_stats(self) -> dict:
+        async with self.pool.connection() as conn:
+            return await (
+                await conn.execute(
+                    """
+                    SELECT (SELECT count(*) FROM request_log) AS requests,
+                           (SELECT min(at) FROM request_log) AS oldest_request,
+                           (SELECT count(*) FROM face_log) AS faces,
+                           (SELECT count(*) FROM face_log WHERE crop IS NOT NULL) AS crops,
+                           (SELECT min(at) FROM face_log WHERE crop IS NOT NULL) AS oldest_crop,
+                           (SELECT coalesce(sum(octet_length(crop)), 0) FROM face_log WHERE crop IS NOT NULL)
+                               AS crop_bytes
+                    """
+                )
+            ).fetchone()
+
+    async def purge_all(self, scope: str, actor: str) -> dict:
+        """Delete the whole request log ("all") or only the crops and embeddings ("crops"), with an audit entry."""
+        if scope not in ("all", "crops"):
+            raise ValueError("scope must be 'all' or 'crops'")
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                if scope == "all":
+                    faces = (await conn.execute("DELETE FROM face_log")).rowcount
+                    requests = (await conn.execute("DELETE FROM request_log")).rowcount
+                    detail = {"scope": scope, "requests": requests, "faces": faces}
+                else:
+                    cur = await conn.execute("UPDATE face_log SET crop = NULL, embedding = NULL WHERE crop IS NOT NULL")
+                    detail = {"scope": scope, "crops": cur.rowcount}
+                await self._audit(conn, actor, "log.purge_all", detail)
+        log.warning("request log purged", extra={"fields": {"by": actor, **detail}})
+        return detail
 
     async def _audit(self, conn, actor: str, action: str, detail: dict) -> None:
         await conn.execute(

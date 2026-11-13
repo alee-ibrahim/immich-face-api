@@ -27,6 +27,7 @@
   <a href="#errors">Errors</a>
   <a href="#examples">Full examples</a>
   <a href="#practices">Best practices</a>
+  <a href="#privacy">Privacy: what is stored</a>
   <a href="/docs/reference">API reference</a>
   <a href="/docs/openapi.json">openapi.json ↓</a>
 </nav>
@@ -292,9 +293,31 @@ export async function identify(path, attempts = 3) {
     honouring <code>Retry-After</code>. Never retry <code>400</code>, <code>401</code>, <code>413</code> or
     <code>415</code>. Your own upload flow must never depend on this API: tagging can always wait.</li>
   <li><b>Send a reasonable copy.</b> A 2000–3000 px JPEG is faster and gives the same result as a 25 MB original.</li>
-  <li><b>Privacy.</b> Faces are biometric data. The API stores no photos, faces or embeddings and logs no names. Do the same:
-    do not keep face crops or the raw answers longer than needed, and do not build a public "find this face" search.
-    Only people a curator named in the archive can be returned.</li>
+  <li><b>Privacy.</b> Faces are biometric data. The API never stores your photos; what it keeps for its admins is listed
+    under <a href="#privacy">Privacy</a>. Do the same in your app: do not keep face crops or the raw answers longer than
+    needed, and do not build a public "find this face" search. Only people a curator named in the archive can be
+    returned.</li>
+</ul>
+
+<h2 id="privacy">Privacy: what this service stores</h2>
+<p>The uploaded photo is <b>never stored</b>: it is decoded in memory, sent to face detection and dropped. For its admins,
+this deployment keeps:</p>
+<table class="kv">
+  <tr><td>Hourly counts</td><td>requests, faces, matches, errors and latency per app and hour. No names. Kept for the usage retention (default 400 days)</td></tr>
+  <tr><td>Request log</td><td><b>{{ "on" if p.request_log else "off" }}</b>{% if p.request_log %}, kept <b>{{ p.request_days }} days</b>{% endif %}: per identify call the time, app, status or error code, latency, image size in bytes and pixels, the number of faces matched, unknown, ambiguous and near the threshold, and per face (at most {{ p.max_faces }}) its box, the matched <b>name, person id and distance</b> and the nearest named people with their distances</td></tr>
+  <tr><td>Face crops</td><td><b>{{ p.crops }}</b>{% if p.crops != "none" %}, kept <b>{{ p.crop_days }} days</b>: a {{ p.crop_size }} px JPEG of {{ "every detected face" if p.crops == "all" else "each unknown, ambiguous or near-threshold face" }} (a new image, no metadata) and its face embedding, so curators can name missed people. Crops and embeddings are <b>biometric data</b>{% endif %}</td></tr>
+</table>
+<ul>
+  <li>Only signed-in admins see it (<a href="/requests">Requests</a>, <a href="/missed">Missed faces</a>). Crops are served only
+    here, never cached by the browser, and never through the API host.</li>
+  <li>Old entries are deleted automatically (checked every few hours). <b>Delete now:</b> <a href="/requests">Requests</a> →
+    <i>Stored data</i> → type DELETE (crops only, or the whole log); each deletion is recorded with who did it. On the
+    command line: <code>python -m immich_face_api purge --crops --yes</code> or <code>--all --yes</code>.</li>
+  <li><b>Switch off:</b> <code>FACE_API_STORE_CROPS=none</code> (no crops), <code>FACE_API_REQUEST_LOG=false</code> (no
+    request log); retention with <code>FACE_API_REQUEST_LOG_RETENTION_DAYS</code> and <code>FACE_API_CROP_RETENTION_DAYS</code>.
+    Set them on the API (it writes the log) and the admin (it shows the settings).</li>
+  <li>Whether keeping this is lawful (consent, purpose, retention, informing people, an impact assessment) is the
+    responsibility of whoever runs the service.</li>
 </ul>
 
 <p class="muted">Every endpoint, parameter and field: <a href="/docs/reference">API reference</a> ·

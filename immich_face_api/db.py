@@ -112,6 +112,28 @@ SELECT person_id, name, embedding FROM (
 """
 )
 
+# nearest faces of the whole library through Immich's vector index (ORDER BY ... LIMIT on the bare column), then
+# filtered to the owner's people; grouped by person, best distance first
+_SIMILAR_SQL = (
+    """
+WITH nn AS MATERIALIZED (
+  SELECT fs."faceId", (fs.embedding <=> %(emb)s::vector)::float8 AS distance
+  FROM face_search fs
+  ORDER BY fs.embedding <=> %(emb)s::vector
+  LIMIT %(scan)s
+)
+SELECT p."personGroupId"::text, p.name, min(nn.distance), count(*)
+FROM nn
+JOIN asset_face af ON af.id = nn."faceId"
+JOIN person p ON p."personGroupId" = af."personGroupId" AND p."ownerId" = af."ownerId"
+WHERE af."ownerId" = %(owner)s AND NOT p."isHidden" AND"""
+    + _FACE_FILTER
+    + """
+GROUP BY p."personGroupId", p.name
+ORDER BY min(nn.distance)
+"""
+)
+
 
 class SchemaMismatch(RuntimeError):
     pass
@@ -243,3 +265,24 @@ class Database:
                     {"person_id": pid, "name": name, "face_count": int(faces)}
                     for pid, name, faces in await cur.fetchall()
                 ]
+
+    async def similar_people(self, embedding: str, *, probes: int = 0, scan: int = 200, limit: int = 12) -> list[dict]:
+        """People (named or not) of the owner whose faces are nearest to one embedding, for curators ("find similar in
+        Immich"). Uses Immich's approximate face index on purpose: the ``scan`` nearest faces of the whole library
+        first, then only the owner's visible faces that belong to a person, grouped by person. Approximate and
+        best-effort; an empty answer means "nothing close in the index", not "nobody"."""
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                if probes:
+                    row = await (
+                        await conn.execute("SELECT current_setting('vchordrq.probes', true) IS NOT NULL")
+                    ).fetchone()
+                    if row and row[0]:
+                        await conn.execute("SELECT set_config('vchordrq.probes', %s, true)", (str(probes),))
+                async with conn.cursor() as cur:
+                    await cur.execute(_SIMILAR_SQL, {"emb": embedding, "scan": scan, "owner": self.status.owner_id})
+                    rows = await cur.fetchall()
+        return [
+            {"person_id": pid, "name": name or None, "distance": round(float(d), 4), "faces": int(n)}
+            for pid, name, d, n in rows[:limit]
+        ]

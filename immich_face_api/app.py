@@ -29,6 +29,7 @@ from .imaging import ImageRejected, prepare
 from .matching import decide, normalise_box
 from .ml import MLClient, MLError
 from .openapi import OPENAPI_SPEC
+from .requestlog import FaceRecord, RequestLogWriter, RequestRecord, embedding_bytes, kind_of, make_crop, wants_crop
 from .scrub import scrub_breadcrumb, scrub_event
 from .security import ApiKeys, RateLimiter, token_from_headers
 from .store import Store, split_key
@@ -155,6 +156,8 @@ class State:
             if settings.store_url
             else None
         )
+        # request log: only for the API process (the admin's "Try it" is never logged)
+        self.writer: RequestLogWriter | None = None
         self.ready = False
         self.reason = "starting"
 
@@ -181,8 +184,18 @@ class State:
         self.ready, self.reason = ready, reason
         m.READY.set(1 if ready else 0)
 
-    async def identify(self, raw: bytes, *, candidates: int = 0, include_unnamed: bool = False, rid: str = "") -> dict:
-        """The whole pipeline for one image (validate, detect, search, decide). Raises HttpError."""
+    async def identify(
+        self,
+        raw: bytes,
+        *,
+        candidates: int = 0,
+        include_unnamed: bool = False,
+        rid: str = "",
+        log_faces: bool = False,
+    ) -> dict:
+        """The whole pipeline for one image (validate, detect, search, decide). Raises HttpError.
+
+        log_faces: also return "_log" (per-face records for the request log, with crops per FACE_API_STORE_CROPS)."""
         s = self.s
         state = self
         t0 = time.perf_counter()
@@ -226,7 +239,7 @@ class State:
             raise db_failure(exc, rid, "face search failed") from exc
         m.STAGE.labels("db").observe(time.perf_counter() - t2)
 
-        out_faces, matched, ambiguous = [], 0, 0
+        out_faces, matched, ambiguous, logged = [], 0, 0, []
         for face, rows in zip(faces, neighbours, strict=True):
             d = decide(
                 rows,
@@ -259,7 +272,12 @@ class State:
                 matched += 1
                 ambiguous += int(d.ambiguous)
             out_faces.append(entry)
+            if log_faces:
+                logged.append((entry, face, rows))
         out_faces.sort(key=lambda f: (f["box"]["x"], f["box"]["y"]))
+        log_records = await self._face_records(logged, img) if log_faces else None
+        width, height, source_format = img.width, img.height, img.source_format
+        del img
 
         m.FACES_PER_REQUEST.observe(len(faces))
         m.FACES.inc(len(faces))
@@ -267,13 +285,47 @@ class State:
         m.FACES_AMBIGUOUS.inc(ambiguous)
         return {
             "faces": out_faces,
-            "image": {"w": img.width, "h": img.height},
+            "image": {"w": width, "h": height},
             "model": s.face_model,
             "max_distance": s.max_distance,
             "immich_version": state.db.status.immich_version,
             **({"test_mode": True} if include_unnamed else {}),
-            "_stats": {"faces": len(faces), "matched": matched, "ambiguous": ambiguous, "format": img.source_format},
+            "_stats": {"faces": len(faces), "matched": matched, "ambiguous": ambiguous, "format": source_format},
+            **({"_log": log_records} if log_records is not None else {}),
         }
+
+    async def _face_records(self, logged: list, img) -> list[FaceRecord]:
+        """Request-log records for up to log_max_faces faces (in response order), with crops if configured."""
+        s = self.s
+        logged = sorted(logged, key=lambda t: (t[0]["box"]["x"], t[0]["box"]["y"]))[: s.log_max_faces]
+        records = []
+        for i, (entry, _face, rows) in enumerate(logged):
+            near = decide(rows, max_distance=float("inf"), max_candidates=3, ambiguity_margin=0.0)
+            records.append(
+                FaceRecord(
+                    idx=i,
+                    kind=kind_of(entry, s.max_distance, s.near_margin),
+                    box=entry["box"],
+                    detection_score=entry["detection_score"],
+                    person_id=entry["person_id"],
+                    name=entry["name"],
+                    distance=entry["distance"],
+                    candidates=[
+                        {"person_id": c.person_id, "name": c.name, "distance": c.distance, "votes": c.votes}
+                        for c in near.candidates
+                    ],
+                )
+            )
+        todo = [(r, face) for r, (_, face, _) in zip(records, logged, strict=True) if wants_crop(s.store_crops, r.kind)]
+        if todo and img.image is not None:
+
+            def cut() -> None:
+                for r, face in todo:
+                    r.crop = make_crop(img.image, face.box, s.crop_size)
+                    r.embedding = embedding_bytes(face.embedding)
+
+            await asyncio.to_thread(cut)
+        return records
 
     async def readiness_loop(self) -> None:
         while True:
@@ -293,7 +345,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tasks.append(asyncio.create_task(state.faces.loop()))
         if state.store:
             await state.store.open(migrate=True, wait=False)
-            tasks.append(asyncio.create_task(state.store.flush_loop(settings.usage_retention_days)))
+            tasks.append(
+                asyncio.create_task(
+                    state.store.flush_loop(
+                        settings.usage_retention_days,
+                        request_days=settings.request_log_retention_days,
+                        crop_days=settings.crop_retention_days,
+                    )
+                )
+            )
+            if settings.request_log:
+                state.writer = RequestLogWriter(state.store)
+                tasks.append(asyncio.create_task(state.writer.loop()))
         log.info(
             "started",
             extra={
@@ -305,6 +368,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "pinned_immich": settings.expected_immich_version,
                     "clients": sorted(settings.api_keys),
                     "store": bool(settings.store_url),
+                    "request_log": bool(settings.store_url and settings.request_log),
+                    "store_crops": settings.store_crops if settings.store_url and settings.request_log else "none",
                     "test_mode": settings.test_mode,
                 }
             },
@@ -319,6 +384,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if state.store:
                 with contextlib.suppress(Exception):
                     await state.store.flush()
+                if state.writer:
+                    with contextlib.suppress(Exception):
+                        await state.writer.drain()
                 await state.store.close()
             await state.ml.close()
             await state.db.close()
@@ -339,6 +407,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request.state.rid = request.headers.get("x-request-id", "")[:64] or uuid.uuid4().hex
         request.state.client = "-"
         request.state.fields = {}
+        request.state.log = None
         try:
             response = await call_next(request)
         except Exception:  # pragma: no cover - FastAPI turns most errors into responses already
@@ -360,6 +429,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 matched=f.get("matched", 0),
                 ambiguous=f.get("ambiguous", 0),
             )
+        writer = request.app.state.face.writer
+        if writer and request.state.client != "-" and endpoint == "/v1/identify":
+            writer.submit(request_record(request, endpoint, response.status_code, elapsed))
         m.LATENCY.labels(endpoint).observe(elapsed)
         response.headers["X-Request-Id"] = request.state.rid
         response.headers["Cache-Control"] = "no-store"
@@ -444,14 +516,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body = await read_body(request, s.max_upload_bytes)
             raw = extract_image(request.headers.get("content-type", ""), body)
             del body
+            request.state.log = {"image_bytes": len(raw)}
             result = await state.identify(
-                raw, candidates=candidates, include_unnamed=include_unnamed, rid=request.state.rid
+                raw,
+                candidates=candidates,
+                include_unnamed=include_unnamed,
+                rid=request.state.rid,
+                log_faces=state.writer is not None,
             )
             del raw
             stats = result.pop("_stats")
             request.state.fields = stats
+            request.state.log = {
+                **(request.state.log or {}),
+                "image": result["image"],
+                "format": stats["format"],
+                "faces": result.pop("_log", None) or [],
+            }
             return result
         except HttpError as exc:
+            request.state.log = {**(request.state.log or {}), "error_code": exc.code}
             return error_response(exc)
 
     @app.get("/v1/people")
@@ -471,6 +555,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return error_response(exc)
 
     return app
+
+
+def request_record(request: Request, endpoint: str, status: int, elapsed: float) -> RequestRecord:
+    """The request-log entry of one identify call, from what the handler left in request.state."""
+    info = request.state.log or {}
+    faces = info.get("faces") or []
+    stats = request.state.fields or {}
+    image = info.get("image") or {}
+    kinds = [f.kind for f in faces]
+    total = int(stats.get("faces", 0))
+    matched = int(stats.get("matched", 0))
+    return RequestRecord(
+        at=time.time() - elapsed,
+        rid=request.state.rid,
+        client=request.state.client,
+        endpoint=endpoint,
+        status=status,
+        error_code=info.get("error_code"),
+        latency_ms=int(elapsed * 1000),
+        image_bytes=info.get("image_bytes"),
+        image_w=image.get("w"),
+        image_h=image.get("h"),
+        image_format=info.get("format"),
+        faces=total,
+        matched=matched,
+        unknown=total - matched,
+        ambiguous=int(stats.get("ambiguous", 0)),
+        near=kinds.count("near"),
+        face_records=faces,
+    )
 
 
 def _int_param(request: Request, name: str, default: int, lo: int, hi: int) -> int:
