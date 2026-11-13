@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% from "_face.html" import face_card with context %}
+{% block title %}Missed faces{% endblock %}
+{% block body %}
+<h1>Missed faces</h1>
+<p class="muted">Faces the API could not name (<b>unknown</b>), could not decide between two people (<b>ambiguous</b>), or matched
+within {{ p.near_margin }} of the threshold {{ p.max_distance }} (<b>near threshold</b>). Newest first. The nearest named people are shown with
+their distances, also beyond the threshold. To fix a miss, name or merge the right person in Immich; the API picks it up
+within minutes.{% if p.crops == "none" %} Crops are off (<code>FACE_API_STORE_CROPS=none</code>), so only the numbers are shown.{% endif %}</p>
+
+<form method="get" action="/missed" class="filters">
+  <select name="client" aria-label="App">
+    <option value="">All apps</option>
+    {% for name in clients %}<option value="{{ name }}" {{ 'selected' if name == f.client }}>{{ name }}</option>{% endfor %}
+  </select>
+  <select name="kind" aria-label="Kind">
+    <option value="">Unknown, ambiguous and near</option>
+    {% for k, label in (("unknown", "Unknown only"), ("ambiguous", "Ambiguous only"), ("near", "Near threshold only")) %}<option value="{{ k }}" {{ 'selected' if f.kind == k }}>{{ label }}</option>{% endfor %}
+  </select>
+  <label class="muted">from <input type="date" name="since" value="{{ f.since }}"></label>
+  <label class="muted">to <input type="date" name="until" value="{{ f.until }}"></label>
+  <button class="ghost">Show</button>
+</form>
+
+{% if rows %}
+<div class="faces">
+  {% for r in rows %}{{ face_card(r, p, show_request=True) }}{% endfor %}
+</div>
+{% if next_before %}<p><a class="btn" href="/missed?client={{ f.client | urlencode }}&amp;kind={{ f.kind }}&amp;since={{ f.since }}&amp;until={{ f.until }}&amp;before={{ next_before }}">Older</a></p>{% endif %}
+{% else %}<p class="muted">No missed faces match.</p>{% endif %}
+{% endblock %}

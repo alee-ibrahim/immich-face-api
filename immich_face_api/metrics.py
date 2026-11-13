@@ -26,3 +26,7 @@ ML_ERRORS = Counter("face_api_ml_errors_total", "Machine-learning server errors"
 DB_ERRORS = Counter("face_api_db_errors_total", "Database errors")
 READY = Gauge("face_api_ready", "1 when the version pin, schema and dependencies are OK")
 INFLIGHT = Gauge("face_api_ml_inflight", "Images being processed by the ML server")
+REQUEST_LOG_WRITTEN = Counter("face_api_request_log_written_total", "Requests written to the request log")
+REQUEST_LOG_DROPPED = Counter(
+    "face_api_request_log_dropped_total", "Request log entries dropped (store down or queue full)", ["reason"]
+)

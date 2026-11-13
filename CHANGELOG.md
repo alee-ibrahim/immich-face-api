@@ -5,6 +5,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added (request log and missed faces)
+- **Request log** in the admin store (on by default when a store is configured, 90 days): per identify call the app,
+  status / error code, latency, image size, counts of matched, unknown, ambiguous and near-threshold faces, and per face
+  (at most 50) the match and the nearest named people with distances, also beyond the threshold.
+- **Face crops** (`FACE_API_STORE_CROPS=none|unknown|all`, default `none`, 30 days): a 160 px JPEG per face without
+  metadata, plus its embedding for *find similar in Immich*. Biometric data: see README "Request log and face crops".
+- Admin pages *Requests* (filters, detail with crops) and *Missed faces* (unknown, ambiguous, near-threshold faces,
+  newest first, with candidates and distances); *find similar in Immich* lists the nearest named and unnamed people
+  with links to Immich (`FACE_API_IMMICH_URL`).
+- Dashboard: missed-face rate over time, top apps by unknown faces.
+- Retention purge every few hours; delete-now in the admin UI (typed confirmation, audited) and
+  `python -m immich_face_api purge --crops|--all|--retention`.
+- Written asynchronously through a bounded queue: identify never waits for the store; entries are dropped and counted
+  (`face_api_request_log_dropped_total`) when it is down.
+
+### Changed
+- The store is no longer "aggregates only": see the privacy notes in README, SECURITY.md and the admin Docs page.
+
 ### Added (labeler coverage)
 - Named-neighbour vote (`named_people`): more clusters of people already named in Immich.
 - `write_sources`: only approved sources are written; others are proposed and held.

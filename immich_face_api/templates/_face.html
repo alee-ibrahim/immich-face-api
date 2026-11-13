@@ -1,0 +1,31 @@
+{# A logged face: crop (if stored), kind, match, nearest named people with distances, links. #}
+{% macro kind_chip(kind) -%}
+<span class="chip {{ {'unknown': 'bad', 'ambiguous': 'warn', 'near': 'warn', 'matched': 'good'}[kind] }}">{{ {'near': 'near threshold'}.get(kind, kind) }}</span>
+{%- endmacro %}
+
+{% macro person(id, name) -%}
+{% set url = person_url(id) %}{% if url %}<a href="{{ url }}" rel="noreferrer" target="_blank">{{ name or "unnamed" }}</a>{% else %}{{ name or "unnamed" }}{% endif %}
+{%- endmacro %}
+
+{% macro face_card(f, p, show_request=False) %}
+<div class="face-card">
+  {% if f.has_crop %}<img class="crop" src="/crops/{{ f.id }}.jpg" alt="Face {{ f.idx + 1 }}" loading="lazy" width="160" height="160">
+  {% else %}<div class="crop none">{{ "crop expired" if p.crops != "none" else "no crop" }}</div>{% endif %}
+  <div class="meta">
+    <div>{{ kind_chip(f.kind) }} <span class="muted">face {{ f.idx + 1 }} · score {{ "%.2f" | format(f.detection_score) }}</span></div>
+    {% if f.name %}<div class="match"><b>{{ person(f.person_id, f.name) }}</b> <span class="muted">distance {{ "%.3f" | format(f.distance) }}</span></div>
+    {% else %}<div class="match"><b>unknown</b> <span class="muted">no named person within {{ p.max_distance }}</span></div>{% endif %}
+    {% if f.candidates %}
+    <ol class="cands">
+      {% for c in f.candidates %}
+      <li>{{ person(c.person_id, c.name) }} <span class="{{ 'muted' if c.distance > p.max_distance else '' }}">{{ "%.3f" | format(c.distance) }}</span>{% if c.distance > p.max_distance %} <span class="muted">(beyond {{ p.max_distance }})</span>{% endif %}</li>
+      {% endfor %}
+    </ol>
+    {% else %}<div class="muted">No named face among the nearest.</div>{% endif %}
+    <div class="links">
+      {% if show_request %}<a href="/requests/{{ f.request_id }}">request</a> · <span class="muted">{{ f.client }} · {{ f.at | ago }}</span>{% endif %}
+      {% if f.has_embedding %}{% if show_request %} · {% endif %}<a href="/faces/{{ f.id }}/similar">find similar in Immich</a>{% endif %}
+    </div>
+  </div>
+</div>
+{% endmacro %}

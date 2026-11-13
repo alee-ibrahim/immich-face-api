@@ -4,7 +4,7 @@
 <h1>Dashboard</h1>
 <div class="filters">
   {% for r in ("24h", "7d", "30d", "90d") %}<a href="/?range={{ r }}" class="{{ 'on' if r == range }}">{{ r }}</a>{% endfor %}
-  <span class="muted">all apps · /v1/identify · counts only, no images or names are kept</span>
+  <span class="muted">all apps · /v1/identify · hourly counts{% if log_on %} · details per request on the Requests page{% endif %}</span>
 </div>
 {% include "_usage.html" %}
 
@@ -21,4 +21,17 @@
   {% endfor %}
 </table></div>
 {% else %}<p class="muted">No app called the API in this period.</p>{% endif %}
+
+<h2>Top apps by unknown faces, {{ range }}</h2>
+{% if top_unknown %}
+<div class="scroll"><table class="cards">
+  <tr><th>App</th><th class="num">Unknown faces</th><th class="num">Faces</th><th class="num">Missed-face rate</th><th></th></tr>
+  {% for a in top_unknown %}
+  <tr><td data-label="App">{{ a.client }}</td>
+    <td class="num" data-label="Unknown faces">{{ "{:,}".format(a.unknown) }}</td><td class="num" data-label="Faces">{{ "{:,}".format(a.faces) }}</td>
+    <td class="num" data-label="Missed-face rate">{{ pct(a.unknown, a.faces) }}</td>
+    <td data-label="">{% if log_on %}<a href="/missed?client={{ a.client | urlencode }}">missed faces</a>{% endif %}</td></tr>
+  {% endfor %}
+</table></div>
+{% else %}<p class="muted">No unknown faces in this period.</p>{% endif %}
 {% endblock %}

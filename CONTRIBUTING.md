@@ -20,7 +20,8 @@ The tests need no Immich: the ML server and the database are mocked.
 - **No secrets, hostnames or internal details** of your own deployment in code, examples or issues.
 - Keep the service **read-only** towards Immich and **stateless**: nothing written to disk or a database.
 - Never log or report image bytes, embeddings, person names or API keys. If you add a log line or an error path, check
-  `immich_face_api/scrub.py` still covers it.
+  `immich_face_api/scrub.py` still covers it. The request log in the admin store (`requestlog.py`) is the one
+  documented place where names, crops and embeddings are kept; keep it behind its settings and retention.
 - Changing anything that reads Immich's tables or calls its ML server: say which Immich version you tested against,
   and update `EXPECTED_COLUMNS` in `db.py`, the README "Compatibility" table and the CHANGELOG.
 - API changes: update `immich_face_api/openapi.json` (a test checks that every route is documented) and the README.

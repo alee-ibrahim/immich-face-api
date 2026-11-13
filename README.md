@@ -8,7 +8,7 @@
 a photo; it finds the faces and returns, for each one, the **named Immich person** it most likely shows (or `null`).
 
 - [Why](#why) · [How it works](#how-it-works) · [Quick start](#quick-start-docker-compose) · [Configuration](#configuration)
-- [Admin UI](#admin-ui-optional) · [API](#api) · [Client examples](#client-examples) · [Matching](#the-matching-algorithm) · [Security](#security-model)
+- [Admin UI](#admin-ui-optional) · [Request log and face crops](#request-log-and-face-crops) · [API](#api) · [Client examples](#client-examples) · [Matching](#the-matching-algorithm) · [Security](#security-model)
 - [Privacy](#privacy-and-biometric-data) · [Compatibility](#compatibility-and-the-version-pin) · [Upgrading](#upgrading-immich)
 - [Troubleshooting](#troubleshooting) · [FAQ](#faq) · [Limitations](#limitations) · [People labeler](#people-labeler) · [Development](#development)
 
@@ -26,7 +26,8 @@ immich-face-api reuses what Immich already has:
 - **the names curators gave** in Immich, read-only, from one library owner;
 
 and turns them into one API call that returns **suggestions** for a human to confirm. It does not change Immich, never
-stores an image or embedding, and reads only four tables of Immich's database.
+stores an uploaded photo, and reads only four tables of Immich's database. (With the optional admin store it can keep a
+[request log and face crops](#request-log-and-face-crops) for curators; crops are off by default.)
 
 ## How it works
 
@@ -46,8 +47,8 @@ flowchart LR
     prom -. ":9090/metrics" .-> api
     api -. errors .-> sentry
     admin["admin UI (optional)<br/>:8081, internal only, OIDC"]
-    store[("own PostgreSQL (optional)<br/>API keys, hourly usage counts")]
-    api -- "key lookup, usage counts" --> store
+    store[("own PostgreSQL (optional)<br/>API keys, hourly usage counts,<br/>request log, face crops (opt-in)")]
+    api -- "key lookup, usage counts,<br/>request log (async)" --> store
     admin --> store
     admin -- "Try it" --> ml
 ```
@@ -169,13 +170,15 @@ metrics, never the key.
 A small web UI for the people who run the service: **usage analytics** and **API keys per app**. It is a separate
 process from the same image (`python -m immich_face_api admin`, port **8081**). Keep it on an internal network and
 never route it publicly; the API port (8080) never serves it. Its paths (`/`, `/login`, `/auth/callback`, `/logout`,
-`/usage`, `/keys`, `/try`, `/docs`, `/static`) do not overlap the API's (`/v1/*`, `/healthz`, `/openapi.json`), so one
+`/usage`, `/requests`, `/missed`, `/faces`, `/crops`, `/privacy`, `/keys`, `/try`, `/docs`, `/static`) do not overlap the API's (`/v1/*`, `/healthz`, `/openapi.json`), so one
 internal hostname can serve both: route `/v1/` and `/healthz` to the API, everything else to the admin.
 
 | Page | What |
 | --- | --- |
-| Dashboard | identify requests, faces detected, match rate, unknown rate, latency p50/p95, errors and refusals for 24 h / 7 d / 30 d / 90 d; charts per hour or day; per-app table |
+| Dashboard | identify requests, faces detected, match rate, unknown rate, missed-face rate over time, top apps by unknown faces, latency p50/p95, errors and refusals for 24 h / 7 d / 30 d / 90 d; charts per hour or day; per-app table |
 | Usage | the same for one app, with a table view |
+| Requests | the request log: what each app asked and what was found, filterable; detail with face crops; *Stored data* with retention, sizes and **delete now**. See [Request log and face crops](#request-log-and-face-crops) |
+| Missed faces | unknown, ambiguous and near-threshold faces with crops and their nearest named people; *find similar in Immich* |
 | Apps & keys | create a key for an app (owner, label, rate limit per minute, expiry); the key is **shown once**; revoke; last used; an audit list of who created or revoked what. Keys from `FACE_API_API_KEYS` are listed read-only |
 | Try it | upload a photo, see the boxes and names drawn over it (same pipeline as `/v1/identify`); nothing is stored or counted |
 | Docs | quick start, authentication, endpoints with examples (curl, PHP/Laravel, Python, Node; language tabs and copy buttons), limits, errors, best practices; an API reference rendered from the bundled OpenAPI document and a download of `openapi.json`. The base URL shown is `FACE_API_DOCS_BASE_URL` (default: the request's own host) |
@@ -187,9 +190,11 @@ working unchanged, so existing clients need no change; to move one into the UI, 
 client, then remove it from `FACE_API_API_KEYS`.
 
 **Store.** Keys and analytics need the service's **own** small PostgreSQL (`FACE_API_STORE_URL`), never Immich's
-database: Immich stays read-only. Tables are created on start (`immich_face_api/migrations/`). Analytics are hourly
-**aggregates only** (counts per app and endpoint, and a latency histogram): no images, embeddings, names, IP addresses
-or keys; kept `FACE_API_USAGE_RETENTION_DAYS` (400). The API pods write their counts every 30 s.
+database: Immich stays read-only. Tables are created on start (`immich_face_api/migrations/`, applied once each
+under an advisory lock, so several pods can start at once). Analytics are hourly **aggregates** (counts per app and
+endpoint, and a latency histogram): no images, embeddings, names, IP addresses or keys; kept
+`FACE_API_USAGE_RETENTION_DAYS` (400). The API pods write their counts every 30 s. The store also holds the
+[request log and face crops](#request-log-and-face-crops) if enabled.
 
 **Sign-in.** Any OpenID Connect provider (`FACE_API_OIDC_ISSUER`, or `FACE_API_OIDC_TENANT_ID` for Microsoft Entra,
 plus client id and secret; redirect URI `<FACE_API_PUBLIC_URL>/auth/callback`). Who may sign in: by default whoever the
@@ -219,6 +224,74 @@ or style.
 | `FACE_API_DOCS_BASE_URL` | request host | the API base URL shown in the admin docs (e.g. the public API host) |
 
 With a store configured, `FACE_API_API_KEYS` becomes optional.
+
+## Request log and face crops
+
+So that the people who run the service can see **what was asked** and **which faces were missed**, the API can keep a
+request log and small face crops in the store. This is **off unless a store is configured**
+(`FACE_API_STORE_URL`), and crops are **off by default**. It is the one place where this service keeps data about
+faces, so read this section before switching crops on.
+
+**Never stored:** the uploaded photo, IP addresses, API keys.
+
+| What | When | Kept | Contents |
+| --- | --- | --- | --- |
+| Hourly counts | always with a store | `FACE_API_USAGE_RETENTION_DAYS` (400) | requests, faces, matched, ambiguous, errors, latency per app and hour. No names |
+| Request log | `FACE_API_REQUEST_LOG=true` (default, with a store) | `FACE_API_REQUEST_LOG_RETENTION_DAYS` (90) | per `/v1/identify` call: time, app, status / error code, latency, request id, image bytes, width, height and format; counts of faces, matched, unknown, ambiguous and near-threshold faces; per face (at most `FACE_API_LOG_MAX_FACES`, 50): box, detection score, kind, the matched **person id, name and distance**, and the 3 nearest named people with distances **also beyond the threshold** (near-misses) |
+| Face crops | `FACE_API_STORE_CROPS=unknown` or `all` (default `none`) | `FACE_API_CROP_RETENTION_DAYS` (30) | per logged face (`unknown`: only unknown, ambiguous and near-threshold faces; `all`: every face): a `FACE_API_CROP_SIZE` (160) px JPEG of the face with some margin, cut from the cleaned image (a new image: no EXIF, GPS or other metadata), and the face **embedding** (512 × float16), kept exactly as long as the crop |
+
+Kinds: **unknown** (no named person within `FACE_API_MAX_DISTANCE`), **ambiguous** (runner-up within
+`FACE_API_AMBIGUITY_MARGIN`), **near** (matched, but within `FACE_API_NEAR_MARGIN`, 0.05, of the threshold),
+**matched**.
+
+**Crops and embeddings are biometric data**, and the request log links names to times and apps. Whether you may keep
+them, for how long and for which purpose (consent, legitimate interest, informing people, a data protection impact
+assessment) is **the deployer's responsibility**. Keep retention short and the admin UI internal.
+
+**Admin pages.** *Requests*: a list filterable by app, date range, status and "has unknown faces", with a detail page
+per request (faces left to right, crops, matches, near-misses). *Missed faces*: unknown, ambiguous and near-threshold
+faces, newest first, filterable by app, kind and date, each with its nearest named people and distances, so a curator
+can tell "not named yet" from "named, but too far". *Find similar in Immich* (when an embedding is stored): the
+nearest people of the whole library from Immich's own vector index, named and **unnamed**, with links to
+`<FACE_API_IMMICH_URL>/people/<id>`, so the curator can name or merge the right cluster **in Immich** (this service
+never writes to Immich). The dashboard adds the missed-face rate over time and the top apps by unknown faces.
+
+**How crops are protected.** Served only by the admin process, only to signed-in admins (`/crops/<id>.jpg`), with
+`Cache-Control: no-store`; the API port has no such route (tested). With one hostname for both, route only the API's
+paths publicly (see [Admin UI](#admin-ui-optional)).
+
+**Deleting.** Retention runs in the API every few hours (expired crops and embeddings are cleared first, expired
+requests are deleted with their faces). To delete now: *Requests → Stored data* in the admin UI (type `DELETE`;
+crops only, or the whole log), or
+
+```bash
+python -m immich_face_api purge --crops --yes   # all crops and embeddings
+python -m immich_face_api purge --all --yes     # the whole request log
+python -m immich_face_api purge --retention     # apply the retention settings now
+```
+
+Both are recorded in the store's audit log (who, when, how many rows).
+
+**Switching off.** `FACE_API_STORE_CROPS=none` stops new crops; `FACE_API_REQUEST_LOG=false` stops the log (hourly
+counts continue). Existing rows stay until their retention ends or you purge them. Set the variables on the API (which
+writes) and on the admin (which shows the settings).
+
+**Performance.** The API never waits for the store: entries go to a bounded in-memory queue (500) and a background
+task writes them in batches. If the store is down or slow, entries are dropped and counted
+(`face_api_request_log_dropped_total{reason}`), and identify answers as before. Cutting crops takes a few
+milliseconds per face, in a worker thread.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `FACE_API_REQUEST_LOG` | `true` | keep the request log (needs `FACE_API_STORE_URL`) |
+| `FACE_API_REQUEST_LOG_RETENTION_DAYS` | `90` | requests (with their faces) older than this are deleted |
+| `FACE_API_STORE_CROPS` | `none` | `none`, `unknown` (unknown, ambiguous, near-threshold faces) or `all` |
+| `FACE_API_CROP_RETENTION_DAYS` | `30` | crops and embeddings older than this are cleared |
+| `FACE_API_CROP_SIZE` | `160` | longest edge of a crop, px (64-512) |
+| `FACE_API_LOG_MAX_FACES` | `50` | faces logged and cropped per request |
+| `FACE_API_NEAR_MARGIN` | `0.05` | a match this close to `FACE_API_MAX_DISTANCE` counts as "near" |
+| `FACE_API_IMMICH_URL` | | Immich web URL for person links, e.g. `https://photos.example.org` |
+| `FACE_API_SIMILAR_PROBES` | `32` | `vchordrq.probes` for "find similar" (Immich's face index needs probes set per query; 0: leave the database default) |
 
 ## API
 
@@ -406,7 +479,7 @@ float16 matrix and searches it with one matrix product (numpy):
 | Authorization | a client can identify and list named people; nothing else exists |
 | Abuse | token bucket per client, bounded ML concurrency with queue timeout, 15 MB / 50 MP limits, no OpenAPI UI, metrics on another port |
 | Input | magic bytes, one decoder per format, pixel limit before decoding, first frame only, metadata never passed on |
-| Data | images and embeddings stay in memory for the request only; read-only DB role on four tables; every transaction read-only; no Immich API key, no access to Immich's files |
+| Data | the uploaded image stays in memory for the request only; face crops and embeddings only if `FACE_API_STORE_CROPS` is set, in the admin store, with a retention; read-only DB role on four tables; every transaction read-only; no Immich API key, no access to Immich's files |
 | Browser | no CORS headers ever: browsers cannot read responses cross-origin |
 | Logs | one JSON line per request: client name, status, duration, number of faces and matches, request id, `CF-Connecting-IP` if present. Never image data, embeddings, names or keys |
 | Error reports | optional Sentry/GlitchTip: `send_default_pii` off, no local variables, no request body/headers/cookies/query/user/server name; tokens, e-mails, vectors and long key-like strings redacted in messages, breadcrumbs, tags and extra |
@@ -423,7 +496,10 @@ retention, informing people), is the deployer's responsibility.** This project g
 
 What the design does to help:
 
-- It stores **no images and no embeddings** of uploads; it has no database of its own.
+- It never stores the uploaded photo. Without a store it keeps nothing at all. With a store it keeps hourly counts,
+  and by default a [request log](#request-log-and-face-crops) (names, person ids, distances; 90 days); **face crops and
+  embeddings only if you switch them on** (`FACE_API_STORE_CROPS`; 30 days). Everything has a retention and a
+  delete-now button and command.
 - It only returns names a curator chose to type into Immich, for one owner's library; unnamed and hidden people are
   never returned (except in test mode, and then without a name).
 - It is built for **suggestions that a human confirms**, not for automatic identification; do not build a public

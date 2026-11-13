@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% from "_face.html" import kind_chip, person with context %}
+{% block title %}Find similar{% endblock %}
+{% block body %}
+<p><a href="/missed">← Missed faces</a>{% if face %} · <a href="/requests/{{ face.request_id }}">request</a>{% endif %}</p>
+<h1>Find similar in Immich</h1>
+{% if face %}
+<div class="similar-head">
+  {% if face.has_crop %}<img class="crop" src="/crops/{{ face.id }}.jpg" alt="The face" width="160" height="160">{% endif %}
+  <div>
+    <div>{{ kind_chip(face.kind) }} <span class="muted">{{ face.client }} · {{ face.at | ago }}</span></div>
+    {% if face.name %}<div>API answer: <b>{{ face.name }}</b> ({{ "%.3f" | format(face.distance) }})</div>{% else %}<div>API answer: <b>unknown</b></div>{% endif %}
+    <p class="muted">The nearest faces in the whole Immich library (approximate vector index), grouped by person. If the
+    right person is an <b>unnamed</b> cluster, open it in Immich and name it there (or merge it into the named person);
+    the API picks the name up within minutes. Distances above {{ p.max_distance }} are not matched by the API.</p>
+  </div>
+</div>
+{% endif %}
+{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+
+{% if face and not error %}
+{% if not immich %}<p class="muted">Set <code>FACE_API_IMMICH_URL</code> to link people to their Immich page.</p>{% endif %}
+<h2>Unnamed people</h2>
+<div class="scroll"><table class="cards">
+  <tr><th>Person</th><th class="num">Distance</th><th class="num">Faces among the nearest</th></tr>
+  {% for x in unnamed %}
+  <tr><td data-label="Person">{{ person(x.person_id, None) }} <code class="muted">{{ x.person_id[:8] }}</code></td>
+    <td class="num" data-label="Distance">{{ "%.3f" | format(x.distance) }}</td><td class="num" data-label="Faces">{{ x.faces }}</td></tr>
+  {% else %}<tr><td colspan="3" class="muted" data-label="">No unnamed person among the nearest faces.</td></tr>{% endfor %}
+</table></div>
+<h2>Named people</h2>
+<div class="scroll"><table class="cards">
+  <tr><th>Person</th><th class="num">Distance</th><th class="num">Faces among the nearest</th></tr>
+  {% for x in named %}
+  <tr><td data-label="Person">{{ person(x.person_id, x.name) }}</td>
+    <td class="num" data-label="Distance">{{ "%.3f" | format(x.distance) }}</td><td class="num" data-label="Faces">{{ x.faces }}</td></tr>
+  {% else %}<tr><td colspan="3" class="muted" data-label="">No named person among the nearest faces.</td></tr>{% endfor %}
+</table></div>
+{% endif %}
+{% endblock %}

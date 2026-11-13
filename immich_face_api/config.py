@@ -65,6 +65,13 @@ def _float(name: str, default: float, lo: float, hi: float) -> float:
     return value
 
 
+def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
+    value = (_env(name, default) or default).strip().lower()
+    if value not in allowed:
+        raise ConfigError(f"{PREFIX}{name}: expected one of {', '.join(allowed)}")
+    return value
+
+
 def parse_api_keys(text: str) -> dict[str, bytes]:
     """{"client-name": "<sha256 hex of the key>", ...} -> {name: digest bytes}. Plain keys are refused."""
     try:
@@ -157,6 +164,20 @@ class Settings:
     admin_token: str = field(default="", repr=False)
     docs_base_url: str = ""  # API base URL shown in the admin docs; default: the request's own host
 
+    # request log in the store (needs FACE_API_STORE_URL): per identify request what was asked and what was found
+    # (app, image size, faces, matched names, distances, status), no images. See README "Request log and face crops".
+    request_log: bool = True
+    request_log_retention_days: int = 90
+    # face crops for curators: "none" (default), "unknown" (unknown, ambiguous and near-threshold faces) or "all".
+    # Crops are biometric data; the embedding is kept with the crop (same retention) for "find similar in Immich".
+    store_crops: str = "none"
+    crop_retention_days: int = 30
+    crop_size: int = 160
+    log_max_faces: int = 50  # faces logged (and cropped) per request at most
+    near_margin: float = 0.05  # a match within this of max_distance counts as "near the threshold"
+    immich_url: str = ""  # Immich web URL for person links in the admin UI, e.g. https://photos.example.org
+    similar_probes: int = 32  # vchordrq.probes for "find similar in Immich" (0: the database default)
+
     @property
     def oidc_enabled(self) -> bool:
         return bool(self.oidc_issuer and self.oidc_client_id and self.oidc_client_secret)
@@ -241,4 +262,13 @@ class Settings:
             oidc_admin_values=admin_values,
             admin_token=_secret("ADMIN_TOKEN") or "",
             docs_base_url=(_env("DOCS_BASE_URL", "") or "").rstrip("/"),
+            request_log=_bool("REQUEST_LOG", True),
+            request_log_retention_days=_int("REQUEST_LOG_RETENTION_DAYS", 90, 1, 3650),
+            store_crops=_choice("STORE_CROPS", "none", ("none", "unknown", "all")),
+            crop_retention_days=_int("CROP_RETENTION_DAYS", 30, 1, 3650),
+            crop_size=_int("CROP_SIZE", 160, 64, 512),
+            log_max_faces=_int("LOG_MAX_FACES", 50, 1, 500),
+            near_margin=_float("NEAR_MARGIN", 0.05, 0.0, 1.0),
+            immich_url=(_env("IMMICH_URL", "") or "").rstrip("/"),
+            similar_probes=_int("SIMILAR_PROBES", 32, 0, 100_000),
         )
