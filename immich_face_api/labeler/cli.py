@@ -25,6 +25,7 @@ import numpy as np
 from .folders import folder_references, overlap
 from .immich import ImmichAPI, ImmichDB, ImmichError
 from .match import build_identities, held, merge_candidates, named_vote, propose
+from .names import compatible
 from .report import proposals_csv, proposals_html, worklist_csv, worklist_html
 from .settings import ConfigError, LabelerSettings
 from .share_names import NameWriter, share_names, undo_copies
@@ -295,6 +296,53 @@ def cmd_run(s: LabelerSettings, args) -> int:
         ctx.close()
 
 
+CONFLICT_HOLD = "HOLD: the sources disagree on the name"
+
+
+def override_proposals(props: list[dict], overrides: dict[str, dict]) -> tuple[list[dict], Counter]:
+    """Proposals held ONLY because their sources disagree on the name, with a curated name (labeler_override) that
+    fits one of the names the face evidence points to. Anything else stays as it is."""
+    out, c = [], Counter()
+    for p in props:
+        o = overrides.get(p["person_id"])
+        if not o:
+            continue
+        ev = p.get("evidence") or []
+        holds = [e for e in ev if e.startswith("HOLD")]
+        if not holds or any(not h.startswith(CONFLICT_HOLD) for h in holds):
+            c["not_only_a_name_conflict"] += 1
+            continue
+        cands = [p["name"]]
+        for e in ev:
+            if e.startswith("name conflict: "):
+                cands += [x.strip() for x in e[len("name conflict: ") :].split(";")]
+        if not any(compatible(o["name"], x) for x in cands):
+            c["name_not_among_the_evidence"] += 1
+            continue
+        note = f"name decided by {o['source']}" + (f": {o['note']}" if o.get("note") else "")
+        out.append({**p, "name": o["name"], "evidence": [e for e in ev if not e.startswith("HOLD")] + [note]})
+        c["usable"] += 1
+    return out, c
+
+
+def cmd_apply_overrides(s: LabelerSettings, args) -> int:
+    ctx = Context(s)
+    try:
+        source = ctx.store.resolve_run(args.run)
+        run_id = new_run_id()
+        ctx.store.start_run(run_id, "apply-overrides")
+        owner = ctx.owner()
+        ctx.db.check(need_paths=False)
+        props, c = override_proposals(ctx.store.proposals(source, args.band), ctx.store.overrides())
+        res = _write_names(ctx, run_id, source, owner, props)
+        stats = {"source_run": source, "bands": args.band, **c, **res}
+        ctx.store.finish_run(run_id, "ok", stats)
+        log.info("apply-overrides %s from %s: %s", run_id, source, stats)
+        return 0
+    finally:
+        ctx.close()
+
+
 def cmd_apply(s: LabelerSettings, args) -> int:
     ctx = Context(s)
     try:
@@ -471,6 +519,9 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("--run", nargs="*", help="apply/run (or share-names) run ids whose writes to revert")
     u.add_argument("--person", nargs="*", help="person ids to revert")
     u.add_argument("--copies", action="store_true", help="revert share-names copies instead of the owner's names")
+    ao = sub.add_parser("apply-overrides", help="write curated names (labeler_override) for name conflicts")
+    ao.add_argument("--run", required=True, help="run id, or 'latest'")
+    ao.add_argument("--band", action="append", choices=BANDS, required=True)
     wl = sub.add_parser("worklist", help="biggest unnamed people the latest run will not name (for curators)")
     wl.add_argument("--top", type=int, default=200)
     sn = sub.add_parser("share-names", help="copy owner names into empty shared copies")
@@ -494,6 +545,7 @@ def main(argv: list[str] | None = None) -> int:
             "apply": cmd_apply,
             "share-names": cmd_share_names,
             "worklist": cmd_worklist,
+            "apply-overrides": cmd_apply_overrides,
             "undo": cmd_undo,
             "export": cmd_export,
             "status": cmd_status,
