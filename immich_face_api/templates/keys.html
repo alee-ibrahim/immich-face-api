@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Apps &amp; keys{% endblock %}
+{% block body %}
+<h1>Apps &amp; keys</h1>
+{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+{% if created %}
+<div class="notice">
+  <b>Key for {{ created.app }} created.</b> Copy it now: it is shown only this once and cannot be recovered.
+  Store it in the calling app's secret store and send it as <code>Authorization: Bearer &lt;key&gt;</code>.
+  <span class="token">{{ created.key }}</span>
+  <p class="muted">Leaving or reloading this page does not show it again.</p>
+</div>
+{% endif %}
+
+<div class="panel">
+  <form method="post" action="/keys" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>App<input type="text" name="app_name" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]*" placeholder="website"></label>
+    <label>Owner<input type="text" name="owner" maxlength="200" placeholder="team or person"></label>
+    <label class="grow">Label<input type="text" name="label" maxlength="200" placeholder="e.g. production"></label>
+    <label>Requests / minute<input type="number" name="rate" min="1" max="100000" placeholder="{{ default_rate }} (default)"></label>
+    <label>Expires
+      <select name="expires_days">
+        <option value="">never</option><option value="30">in 30 days</option><option value="90">in 90 days</option>
+        <option value="180">in 180 days</option><option value="365" selected>in 1 year</option>
+      </select></label>
+    <button>Create key</button>
+  </form>
+  <p class="muted">Several keys may share an app name (rotation: create the new key, switch the app, revoke the old one). Usage is counted per app.</p>
+</div>
+
+<h2>Keys</h2>
+<div class="scroll"><table class="cards">
+  <tr><th>App</th><th>Key</th><th>Owner</th><th>Label</th><th class="num">Limit/min</th><th>Expires</th>
+      <th>Last used</th><th>Created</th><th></th></tr>
+  {% for k in keys %}
+  <tr class="{{ 'off' if k.revoked_at }}">
+    <td data-label="App"><a href="/usage?client={{ k.app | urlencode }}">{{ k.app }}</a></td>
+    <td data-label="Key"><code>ifa_{{ k.prefix }}_…</code></td>
+    <td class="wrap" data-label="Owner">{{ k.owner or "—" }}</td>
+    <td class="wrap" data-label="Label">{{ k.label or "—" }}</td>
+    <td class="num" data-label="Limit/min">{{ k.rate_limit_per_minute or "default" }}</td>
+    <td data-label="Expires">{% if k.expires_at %}{% set left = k.expires_at | until %}<span class="chip {{ 'bad' if left == 'expired' else 'warn' if left.endswith('h') or (left.endswith('d') and left[:-1] | int < 14) }}">{{ left }}</span>{% else %}never{% endif %}</td>
+    <td data-label="Last used">{{ k.last_used_at | ago }}</td>
+    <td data-label="Created">{{ k.created_at | ago }}{% if k.created_by %} <span class="muted">by {{ k.created_by }}</span>{% endif %}</td>
+    <td data-label="">{% if k.revoked_at %}<span class="chip bad">revoked {{ k.revoked_at | ago }}</span>{% else %}
+      <form class="inline" method="post" action="/keys/{{ k.id }}/revoke" data-confirm="Revoke this key for {{ k.app }}? Calls with it stop within a minute.">
+        <input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">Revoke</button>
+      </form>{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="9" class="muted" data-label="">No keys created here yet.</td></tr>{% endfor %}
+</table></div>
+
+{% if env_clients %}
+<h2>Keys from the environment</h2>
+<p class="muted">Configured by the deployment (<code>FACE_API_API_KEYS</code>, hashes only). They work alongside the keys above and are
+managed where the deployment's secrets live, not here.</p>
+<div class="scroll"><table class="cards">
+  <tr><th>App</th><th>Source</th></tr>
+  {% for name in env_clients %}<tr><td data-label="App"><a href="/usage?client={{ name | urlencode }}">{{ name }}</a></td><td data-label="Source"><span class="chip">environment</span></td></tr>{% endfor %}
+</table></div>
+{% endif %}
+
+<h2>Recent changes</h2>
+<div class="scroll"><table class="cards">
+  <tr><th>When</th><th>Who</th><th>What</th><th>App</th><th>Key</th></tr>
+  {% for a in audit %}
+  <tr><td data-label="When">{{ a.at | ago }}</td><td data-label="Who">{{ a.actor }}</td><td data-label="What">{{ a.action }}</td>
+    <td data-label="App">{{ a.detail.app }}</td><td data-label="Key"><code>ifa_{{ a.detail.prefix }}_…</code></td></tr>
+  {% else %}<tr><td colspan="5" class="muted" data-label="">Nothing yet.</td></tr>{% endfor %}
+</table></div>
+<script src="/static/confirm.js"></script>
+{% endblock %}

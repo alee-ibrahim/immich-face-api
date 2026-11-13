@@ -4,7 +4,7 @@
     "title": "immich-face-api",
     "version": "0.1.0",
     "summary": "Who is in this photo? Faces matched against the named people of an Immich library.",
-    "description": "Server-to-server API. Every /v1 call needs `Authorization: Bearer <api key>`. Results are suggestions for a human to confirm. Nothing is stored.",
+    "description": "Server-to-server API. Every /v1 call needs the API key, as `Authorization: Bearer <key>` or `X-API-Key: <key>`. Results are suggestions for a human to confirm. Nothing is stored.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -18,6 +18,9 @@
   "security": [
     {
       "bearer": []
+    },
+    {
+      "apiKey": []
     }
   ],
   "paths": {
@@ -267,6 +270,12 @@
         "type": "http",
         "scheme": "bearer",
         "description": "Per-client API key; the server stores only its SHA-256."
+      },
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "The same key, as a header instead of Authorization: Bearer."
       }
     },
     "responses": {

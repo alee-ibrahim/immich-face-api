@@ -34,11 +34,59 @@ services:
       - "127.0.0.1:8080:8080"   # put a TLS reverse proxy in front; never publish it bare
     networks: [immich]
 
+  # ---- optional: admin UI + its own store (docker compose --profile admin up -d) ----------------------------
+  # Keys made in the UI and usage analytics live in face-store (NOT Immich's database). To let the API above accept
+  # UI-made keys and record usage too, give it the same FACE_API_STORE_URL / FACE_API_STORE_PASSWORD_FILE.
+  face-store:
+    profiles: [admin]
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: face_api
+      POSTGRES_USER: face_api
+      POSTGRES_PASSWORD_FILE: /run/secrets/store_password
+    secrets: [store_password]
+    volumes: [face-store:/var/lib/postgresql]
+    networks: [immich]
+
+  face-admin:
+    profiles: [admin]
+    image: ghcr.io/alee-ibrahim/immich-face-api:main
+    command: ["admin"]
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=16m"]
+    env_file: .env
+    environment:
+      FACE_API_ML_URL: http://immich-machine-learning:3003
+      FACE_API_DB_HOST: database
+      FACE_API_DB_SSLMODE: disable
+      FACE_API_DB_PASSWORD_FILE: /run/secrets/db_password
+      FACE_API_STORE_URL: postgresql://face_api@face-store:5432/face_api
+      FACE_API_STORE_PASSWORD_FILE: /run/secrets/store_password
+      FACE_API_ADMIN_TOKEN_FILE: /run/secrets/admin_token     # or FACE_API_OIDC_* for single sign-on
+      FACE_API_SESSION_HTTPS_ONLY: "false"                    # local plain HTTP only
+    secrets: [db_password, store_password, admin_token]
+    ports:
+      - "127.0.0.1:8081:8081"   # admin UI: keep it local or on an internal network, never public
+    depends_on: [face-store]
+    networks: [immich]
+
 secrets:
+  store_password:
+    file: ./store_password.txt
+  admin_token:
+    file: ./admin_token.txt
   db_password:
     file: ./db_password.txt
   api_keys:
     file: ./api-keys.json
+
+volumes:
+  face-store:
 
 networks:
   immich:

@@ -22,6 +22,17 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: faceapi
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d faceapi" --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      FACE_API_TEST_STORE_URL: postgresql://postgres:ci-only@localhost:5432/faceapi
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0

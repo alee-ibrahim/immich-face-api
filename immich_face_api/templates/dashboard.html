@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block body %}
+<h1>Dashboard</h1>
+<div class="filters">
+  {% for r in ("24h", "7d", "30d", "90d") %}<a href="/?range={{ r }}" class="{{ 'on' if r == range }}">{{ r }}</a>{% endfor %}
+  <span class="muted">all apps · /v1/identify · counts only, no images or names are kept</span>
+</div>
+{% include "_usage.html" %}
+
+<h2>Apps, {{ range }}</h2>
+{% if by_client %}
+<div class="scroll"><table class="cards">
+  <tr><th>App</th><th class="num">Requests</th><th class="num">Faces</th><th class="num">Match rate</th>
+      <th class="num">Errors</th><th class="num">Refused</th><th>Last activity</th></tr>
+  {% for a in by_client %}
+  <tr><td data-label="App"><a href="/usage?client={{ a.client | urlencode }}&amp;range={{ range }}">{{ a.client }}</a></td>
+    <td class="num" data-label="Requests">{{ "{:,}".format(a.requests) }}</td><td class="num" data-label="Faces">{{ "{:,}".format(a.faces) }}</td>
+    <td class="num" data-label="Match rate">{{ pct(a.matched, a.faces) }}</td><td class="num" data-label="Errors">{{ a.server_errors }}</td>
+    <td class="num" data-label="Refused">{{ a.client_errors }}</td><td data-label="Last activity">{{ a.last_hour | ago }}</td></tr>
+  {% endfor %}
+</table></div>
+{% else %}<p class="muted">No app called the API in this period.</p>{% endif %}
+{% endblock %}

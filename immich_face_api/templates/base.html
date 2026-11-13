@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{% block title %}Face API{% endblock %} · Face API admin</title>
+<link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+<header><div class="bar">
+  <a class="brand" href="/">Face API</a>
+  {% if user %}
+  <nav>
+    {% set here = request.url.path %}
+    <a href="/" class="{{ 'on' if here == '/' }}">Dashboard</a>
+    <a href="/usage" class="{{ 'on' if here.startswith('/usage') }}">Usage</a>
+    <a href="/keys" class="{{ 'on' if here.startswith('/keys') }}">Apps &amp; keys</a>
+    <a href="/try" class="{{ 'on' if here.startswith('/try') }}">Try it</a>
+    <a href="/docs" class="{{ 'on' if here.startswith('/docs') }}">Docs</a>
+  </nav>
+  <div class="who"><span class="name">{{ user.name }}</span>
+    <form class="inline" method="post" action="/logout">
+      <input type="hidden" name="csrf" value="{{ csrf }}"><button class="ghost">Sign out</button>
+    </form>
+  </div>
+  {% endif %}
+</div></header>
+<main>
+{% if user and not ready %}<div class="notice error">The service is not ready (Immich version, schema or a dependency); see the service log.</div>{% endif %}
+{% block body %}{% endblock %}
+</main>
+<footer>immich-face-api {{ version }}</footer>
+</body>
+</html>
