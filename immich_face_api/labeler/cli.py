@@ -107,13 +107,18 @@ def _write_names(ctx: Context, run_id: str, source_run: str | None, owner: str, 
     return c
 
 
+def apply_bands_of(args) -> list[str]:
+    """Bands `run` writes: only those given with --apply-band (none = dry run)."""
+    return [b for b in (args.apply_band or []) if b in BANDS]
+
+
 def cmd_run(s: LabelerSettings, args) -> int:
     ctx = Context(s)
     run_id = new_run_id()
     ctx.store.start_run(run_id, "run")
     t0 = time.monotonic()
-    bands = [b for b in (args.apply_band or []) if b != "none"]
-    stats: dict = {"run_id": run_id, "mode": ("apply " + "+".join(bands)) if bands else "dry run"}
+    apply_bands = apply_bands_of(args)
+    stats: dict = {"run_id": run_id, "mode": ("apply " + "+".join(apply_bands)) if apply_bands else "dry run"}
     notes: list[str] = []
     try:
         owner = ctx.owner()
@@ -183,9 +188,9 @@ def cmd_run(s: LabelerSettings, args) -> int:
         samples = ctx.db.samples(owner, cand, t.cluster_sample_faces) if cand else {}
         props = propose(clusters, identities, t, samples, overlap(fres.refs, fres.face_person))
         merges = merge_candidates(clusters, props, t)
-        bands = Counter(p.band for p in props)
+        band_counts = Counter(p.band for p in props)
         for b in BANDS:
-            stats[f"proposals_{b}"] = bands.get(b, 0)
+            stats[f"proposals_{b}"] = band_counts.get(b, 0)
         stats["merge_candidates"] = len(merges)
 
         ids = {p.person_id for p in props} | {m.a for m in merges} | {m.b for m in merges}
@@ -209,8 +214,8 @@ def cmd_run(s: LabelerSettings, args) -> int:
                 for p in props
             ],
         )
-        if bands:
-            todo = ctx.store.proposals(run_id, bands)
+        if apply_bands:
+            todo = ctx.store.proposals(run_id, apply_bands)
             res = _write_names(ctx, run_id, run_id, owner, todo)
             stats.update({f"apply_{k}": v for k, v in res.items()})
         stats["seconds"] = round(time.monotonic() - t0, 1)
