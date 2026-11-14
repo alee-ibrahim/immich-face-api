@@ -36,6 +36,7 @@ class Card:
     alt_names: dict[str, str] = field(default_factory=dict)
     image_url: str | None = None
     details: dict[str, str] = field(default_factory=dict)
+    label: str = ""  # shown in the evidence instead of the card id (roster: position, organisation)
 
 
 class Fetcher:
@@ -189,6 +190,68 @@ def wikidata_cards(src: WebSource, fetcher: Fetcher) -> list[Card]:
     return list(cards.values())
 
 
+MAX_ROSTER_PEOPLE = 20000
+
+
+def _roster_label(details: dict[str, str]) -> str:
+    if details.get("label"):
+        return details["label"]
+    return ", ".join(details[k] for k in ("position", "organisation") if details.get(k))
+
+
+def roster_cards(src: WebSource, fetcher: Fetcher) -> list[Card]:
+    """Cards from a roster JSON file (local path or http(s) URL): ``{"people": [{"id", "name", "image_url",
+    "alt_names", "details"}]}``. Entries without an id, a name or an http(s) image URL are skipped (logged)."""
+    if src.roster.startswith(("http://", "https://")):
+        body = fetcher.get(src.roster, immutable=src.immutable, limit=MAX_PAGE_BYTES)
+        if body is None:
+            return []
+    else:
+        with open(src.roster, "rb") as f:
+            body = f.read(MAX_PAGE_BYTES + 1)
+        if len(body) > MAX_PAGE_BYTES:
+            raise ValueError(f"roster {src.key}: file larger than {MAX_PAGE_BYTES} bytes")
+    data = json.loads(body)
+    people = data.get("people") if isinstance(data, dict) else None
+    if not isinstance(people, list):
+        raise ValueError(f"roster {src.key}: expected an object with a 'people' list")
+    cards: dict[str, Card] = {}
+    skipped = 0
+    for e in people[:MAX_ROSTER_PEOPLE]:
+        if not isinstance(e, dict):
+            skipped += 1
+            continue
+        cid, name, image = (
+            str(e.get("id") or "").strip(),
+            " ".join(str(e.get("name") or "").split()),
+            e.get("image_url"),
+        )
+        if not cid or not name or not isinstance(image, str) or not image.startswith(("http://", "https://")):
+            skipped += 1
+            continue
+        if cid in cards:
+            skipped += 1
+            continue
+        alt = {str(k): " ".join(str(v).split()) for k, v in (e.get("alt_names") or {}).items() if v}
+        details = {str(k): " ".join(str(v).split())[:300] for k, v in (e.get("details") or {}).items() if v}
+        if src.licence:
+            details.setdefault("licence", src.licence)
+        cards[cid] = Card(
+            source=src.key,
+            id=cid,
+            name=name,
+            alt_names=alt,
+            image_url=image,
+            details=details,
+            label=_roster_label(details),
+        )
+    if skipped:
+        log.warning(
+            "roster %s: %d entries skipped (no id, name or http(s) image_url, or a repeated id)", src.key, skipped
+        )
+    return list(cards.values())
+
+
 class Embedder:
     """Portrait -> faces, exactly as the face API does it (same image preparation, same ML request)."""
 
@@ -247,6 +310,12 @@ def web_references(s: LabelerSettings, store, fetcher: Fetcher, embedder: Embedd
         pages = {}
         if src.kind == "wikidata":
             cards = wikidata_cards(src, fetcher)
+        elif src.kind == "roster":
+            try:
+                cards = roster_cards(src, fetcher)
+            except (OSError, ValueError) as exc:  # a broken roster must not cost the other sources
+                log.warning("roster %s unusable: %s: %s", src.key, type(exc).__name__, exc)
+                cards = []
         else:
             for p in src.pages:
                 body = fetcher.get(p.url, immutable=src.immutable, limit=MAX_PAGE_BYTES)
@@ -277,7 +346,7 @@ def web_references(s: LabelerSettings, store, fetcher: Fetcher, embedder: Embedd
                     name=c.name,
                     centroid=emb,
                     n_photos=1,
-                    label=f"{src.label} {c.id}",
+                    label=f"{src.label}: {c.label}" if c.label else f"{src.label} {c.id}",
                     alt_names=c.alt_names,
                     details=c.details,
                     ambiguous=ambiguous,

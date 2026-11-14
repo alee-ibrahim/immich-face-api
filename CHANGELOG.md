@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added (labeler: roster source)
+- Web source `"kind": "roster"`: people (name, portrait URL, other-language names, details such as position and
+  organisation) from a JSON roster file, a local path or an http(s) URL, typically written by a separate scraper.
+  Position and organisation are shown in the evidence (report and audit), never in the name. A broken roster is
+  logged and skipped; the other sources still run. Example: `examples/labeler/roster.example.json`.
+
 ### Added (people changes and verify)
 - **People change log**: `GET /v1/people/changes?since=<cursor|ISO time>` returns, in order, `created`, `renamed`,
   `faces_moved` (splits and reassignments, counted per window and person pair), `merged` and `deleted` (deleted /
