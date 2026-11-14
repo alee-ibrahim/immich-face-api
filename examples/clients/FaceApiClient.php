@@ -50,6 +50,12 @@ class FaceApiClient
             ->json();
     }
 
+    /** Named people now: ['people' => [...], 'count' => n, 'changes_cursor' => 'pc_...' (with the change log)]. */
+    public function people(): array
+    {
+        return $this->http()->get($this->url('/v1/people'))->throw()->json();
+    }
+
     /** One page of people changes after $cursor (null = from the start). Save 'next_cursor'; repeat while 'has_more'. */
     public function changes(?string $cursor, int $limit = 1000): array
     {
