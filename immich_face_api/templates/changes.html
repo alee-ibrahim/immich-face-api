@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% from "_change.html" import change_row with context %}
+{% block title %}People changes{% endblock %}
+{% block body %}
+<h1>People changes</h1>
+<p class="muted">What curators changed in Immich, as apps see it through <code>GET /v1/people/changes</code>: people named or un-hidden
+(<b>created</b>), <b>renamed</b>, faces moved to another person (<b>faces moved</b>: splits and reassignments), <b>merged</b>
+and <b>deleted</b> (also hidden or name cleared). Only the library owner's named, visible people are tracked. Newest first.</p>
+
+{% if not enabled %}
+<div class="notice">The change log is switched off (<code>FACE_API_CHANGES_INTERVAL=0</code>).</div>
+{% elif not t %}
+<div class="notice">The change log has not started yet: the API builds its first snapshot of the named people a few seconds after it
+starts. Changes before that are not known.</div>
+{% else %}
+<div class="grid">
+  <div class="panel stat"><div class="n">{{ "{:,}".format(t.people) }}</div><div class="l">named people tracked</div></div>
+  <div class="panel stat"><div class="n">{{ "{:,}".format(t.faces) }}</div><div class="l">faces tracked</div></div>
+  <div class="panel stat"><div class="n">{{ t.checked_at | ago }}</div><div class="l">last check (every {{ interval // 60 }} min)</div></div>
+  <div class="panel stat"><div class="n">{{ "{:,}".format(t.events) }}</div><div class="l">events kept ({{ retention }} days)</div></div>
+</div>
+<div class="panel">
+  <ul class="facts">
+    <li>Tracking since <b>{{ t.started_at.strftime("%Y-%m-%d %H:%M") }} UTC</b>; earlier changes are not known.</li>
+    <li>Last full reconcile {{ t.last_full_at | ago }} (every {{ full_hours }} h); last check took {{ t.last_cycle_ms | ms if t.last_cycle_ms is not none else "—" }},
+      {{ t.last_changed_faces if t.last_changed_faces is not none else "—" }} changed faces read, {{ t.last_events or 0 }} events.</li>
+    {% if t.last_error %}<li class="error-text">Last check failed {{ t.last_error_at | ago }}: <code>{{ t.last_error }}</code> (the next check retries; nothing is lost)</li>{% endif %}
+  </ul>
+</div>
+{% endif %}
+
+<form method="get" action="/changes" class="filters">
+  <select name="type" aria-label="Type">
+    <option value="">All types</option>
+    {% for k in types %}<option value="{{ k }}" {{ 'selected' if f.type == k }}>{{ k | replace("_", " ") }}</option>{% endfor %}
+  </select>
+  <input type="text" name="person" value="{{ f.person }}" placeholder="person id" aria-label="Person id" size="38">
+  <button class="ghost">Show</button>
+</form>
+
+<div class="scroll"><table class="cards">
+  <tr><th>Seen (UTC)</th><th>Type</th><th>Change</th><th>Cursor</th></tr>
+  {% for r in rows %}{{ change_row(r) }}
+  {% else %}<tr><td colspan="4" class="muted" data-label="">No changes match.</td></tr>{% endfor %}
+</table></div>
+{% if next_before %}<p><a class="btn" href="/changes?type={{ f.type }}&amp;person={{ f.person | urlencode }}&amp;before={{ next_before }}">Older</a></p>{% endif %}
+<p class="muted">A check sees the state every few minutes, so a change shows the window it happened in, not the exact minute;
+several edits of the same person within one window appear as one net change. Apps apply these events to their stored tags;
+see the Docs page.</p>
+{% endblock %}

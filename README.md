@@ -8,7 +8,7 @@
 a photo; it finds the faces and returns, for each one, the **named Immich person** it most likely shows (or `null`).
 
 - [Why](#why) · [How it works](#how-it-works) · [Quick start](#quick-start-docker-compose) · [Configuration](#configuration)
-- [Admin UI](#admin-ui-optional) · [Request log and face crops](#request-log-and-face-crops) · [API](#api) · [Client examples](#client-examples) · [Matching](#the-matching-algorithm) · [Security](#security-model)
+- [Admin UI](#admin-ui-optional) · [Request log and face crops](#request-log-and-face-crops) · [API](#api) · [Client examples](#client-examples) · [Matching](#the-matching-algorithm) · [People changes](#people-changes) · [Security](#security-model)
 - [Privacy](#privacy-and-biometric-data) · [Compatibility](#compatibility-and-the-version-pin) · [Upgrading](#upgrading-immich)
 - [Troubleshooting](#troubleshooting) · [FAQ](#faq) · [Limitations](#limitations) · [People labeler](#people-labeler) · [Development](#development)
 
@@ -95,7 +95,7 @@ curl -s localhost:8080/readyz              # {"status":"ready"}
 ```
 
 Kubernetes: plain manifests in [`examples/kubernetes/`](examples/kubernetes) (Deployment with a hardened pod, Service,
-NetworkPolicy, Secret example). Keep it behind your ingress with only `/v1/identify`, `/v1/people` and `/healthz` routed.
+NetworkPolicy, Secret example). Keep it behind your ingress with only `/v1/*` and `/healthz` routed.
 
 ## Configuration
 
@@ -164,7 +164,9 @@ metrics, never the key.
 
 [`examples/readonly-role.sql`](examples/readonly-role.sql): `SELECT` on `person`, `asset_face`, `face_search`,
 `version_history` only, read-only transactions, a TLS-only `pg_hba` line. The service also sets
-`default_transaction_read_only` and a 15 s statement timeout on every connection.
+`default_transaction_read_only` and a 15 s statement timeout on every connection (the face cache and the people
+change log raise it for their bulk reads, within a read-only transaction). The change log needs no other grant: it
+reads `person` and `asset_face` (including `asset_face."updateId"`), not Immich's audit tables.
 
 ## Admin UI (optional)
 
@@ -238,7 +240,8 @@ faces, so read this section before switching crops on.
 | What | When | Kept | Contents |
 | --- | --- | --- | --- |
 | Hourly counts | always with a store | `FACE_API_USAGE_RETENTION_DAYS` (400) | requests, faces, matched, ambiguous, errors, latency per app and hour. No names |
-| Request log | `FACE_API_REQUEST_LOG=true` (default, with a store) | `FACE_API_REQUEST_LOG_RETENTION_DAYS` (90) | per `/v1/identify` call: time, app, status / error code, latency, request id, image bytes, width, height and format; counts of faces, matched, unknown, ambiguous and near-threshold faces; per face (at most `FACE_API_LOG_MAX_FACES`, 50): box, detection score, kind, the matched **person id, name and distance**, and the 3 nearest named people with distances **also beyond the threshold** (near-misses) |
+| Request log | `FACE_API_REQUEST_LOG=true` (default, with a store) | `FACE_API_REQUEST_LOG_RETENTION_DAYS` (90) | per `/v1/verify` call only the request line (time, app, status, latency, image size, counts); per `/v1/identify` call: time, app, status / error code, latency, request id, image bytes, width, height and format; counts of faces, matched, unknown, ambiguous and near-threshold faces; per face (at most `FACE_API_LOG_MAX_FACES`, 50): box, detection score, kind, the matched **person id, name and distance**, and the 3 nearest named people with distances **also beyond the threshold** (near-misses) |
+| People change log | `FACE_API_CHANGES_INTERVAL` > 0 (default 300, with a store) | events `FACE_API_CHANGES_RETENTION_DAYS` (365); the snapshot is replaced at every check | ids and names of the owner's named people, which of them each face belongs to (ids only), and the change events (see [People changes](#people-changes)). No images, no embeddings |
 | Face crops | `FACE_API_STORE_CROPS=unknown` or `all` (default `none`) | `FACE_API_CROP_RETENTION_DAYS` (30) | per logged face (`unknown`: only unknown, ambiguous and near-threshold faces; `all`: every face): a `FACE_API_CROP_SIZE` (160) px JPEG of the face with some margin, cut from the cleaned image (a new image: no EXIF, GPS or other metadata), and the face **embedding** (512 × float16), kept exactly as long as the crop |
 
 Kinds: **unknown** (no named person within `FACE_API_MAX_DISTANCE`), **ambiguous** (runner-up within
@@ -354,13 +357,119 @@ curl -sS "https://faces.example.org/v1/identify?candidates=3" -H "Authorization:
 | `ambiguous` | the runner-up is within `FACE_API_AMBIGUITY_MARGIN`: show the candidates, pre-select nothing |
 | `candidates[].votes` | how many of the k nearest faces belong to that person |
 
+### `POST /v1/verify`
+
+Re-checks **claimed people** (for example tags you stored months ago) against a photo: for each claimed person, the
+distance from the nearest face in the photo to that person's faces, whether that is within the threshold, and who
+the best match for that face is **now**. Same key, rate limit, size limits and pipeline as identify; the photo is not
+stored (the request log keeps only the request line: app, status, latency, image size, counts).
+
+Body: `multipart/form-data` with **`image`**, one or more **`person_id`** fields (or comma-separated; at most
+`FACE_API_VERIFY_MAX_CLAIMS`, 10) and optionally **`box`** (`x,y,w,h` or JSON, as returned by identify: then only the
+face overlapping it is compared, IoU ≥ 0.3). With a raw image body, pass `person_id` and `box` in the query.
+
+```bash
+curl -sS "https://faces.example.org/v1/verify" -H "Authorization: Bearer $KEY" \
+  -F image=@event.jpg -F person_id=6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10 -F box=0.412,0.18,0.061,0.103
+```
+
+```json
+{
+  "claims": [
+    {
+      "person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "status": "current",
+      "current_person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "name": "Jane Example",
+      "verdict": "match", "within_threshold": true, "distance": 0.29, "confidence": 0.71,
+      "face": 0, "box": {"x": 0.412, "y": 0.18, "w": 0.061, "h": 0.103},
+      "best_person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "best_name": "Jane Example"
+    }
+  ],
+  "faces": [{"box": {"x": 0.412, "y": 0.18, "w": 0.061, "h": 0.103}, "detection_score": 0.83,
+             "person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "name": "Jane Example", "distance": 0.29, "ambiguous": false}],
+  "image": {"w": 6000, "h": 4000}, "model": "buffalo_l", "max_distance": 0.5, "immich_version": "3.4.1"
+}
+```
+
+| `verdict` | Meaning |
+| --- | --- |
+| `match` | a face is within `max_distance` of the person **and** that person is the best match for it (a same-name split of the person counts as the same) |
+| `match_not_best` | within the threshold, but another person (`best_person_id`) is closer: review |
+| `no_match` | no face within the threshold (`distance` = the nearest anyway) |
+| `no_face` | no face detected, or none at `box` |
+| `no_reference` | the person exists but has no faces left to compare with |
+| `person_gone` | the claimed id is `deleted`, `hidden`, `unnamed` or `unknown` (see `status`) |
+
+`status` is as in [`/v1/people/resolve`](#post-v1peopleresolve): a person that was **merged** is followed to the person
+it was merged into (`current_person_id`, `merged_via`) and compared with that one. The distance is to the nearest of
+the person's cached faces (the same sample of up to `FACE_API_FACE_CACHE_PER_PERSON` faces identify uses), so
+`match` here agrees with what identify would answer.
+
+**Batch:** `POST /v1/verify/batch`, JSON `{"items": [{"ref": "photo-1", "image": "<base64>", "person_ids": [...],
+"box": {...}}]}`: at most `FACE_API_VERIFY_BATCH_MAX` (10) items, the whole body within `FACE_API_MAX_UPLOAD_BYTES`
+(base64 adds a third). One rate-limit token per item. The answer is `{"items": [...]}` in order, each a verify
+response plus `ref`, or `{"ref", "error"}` for a bad item; the batch stops on 429/502/503. It saves round trips, not
+work: every photo still goes through face detection.
+
 ### `GET /v1/people`
 
 Named, not hidden people of the owner, with their number of faces (for a "pick someone else" list):
 
 ```json
-{"people": [{"person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "name": "Jane Example", "face_count": 42}], "count": 1}
+{"people": [{"person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "name": "Jane Example", "face_count": 42}], "count": 1,
+ "changes_cursor": "pc_41"}
 ```
+
+`changes_cursor` (with the [change log](#people-changes)) is the position of the newest change, read **before** the
+list: after a full re-sync from this list, continue `GET /v1/people/changes` from it.
+
+### `GET /v1/people/changes`
+
+What curators changed, in order, since a cursor or a time (`?since=pc_41` or `?since=2026-01-31T00:00:00Z`;
+`limit` 1-5000, default 500). Needs the store and the change log (see [People changes](#people-changes)).
+
+```json
+{
+  "changes": [
+    {"cursor": "pc_42", "type": "created", "at": "2026-01-31T10:05:00Z", "after": "2026-01-31T10:00:00Z",
+     "person_id": "0b7e3b7c-1a52-4d0e-9a9e-2f7c9a1d5e33", "name": "John Example"},
+    {"cursor": "pc_43", "type": "faces_moved", "at": "2026-01-31T10:05:00Z", "after": "2026-01-31T10:00:00Z",
+     "from_person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "from_name": "Jane Example",
+     "to_person_id": "0b7e3b7c-1a52-4d0e-9a9e-2f7c9a1d5e33", "to_name": "John Example", "count": 212}
+  ],
+  "next_cursor": "pc_43", "has_more": false, "resync_required": false,
+  "tracking_since": "2026-01-01T00:00:00Z", "checked_at": "2026-01-31T10:05:00Z"
+}
+```
+
+| `type` | Fields | Meaning |
+| --- | --- | --- |
+| `created` | `person_id`, `name` | a person entered the named set: named for the first time, or un-hidden, or re-named after its name was cleared |
+| `renamed` | `person_id`, `old_name`, `new_name` | name changed |
+| `faces_moved` | `from_person_id`, `from_name`, `to_person_id`, `to_name`, `count` | `count` faces of a named person now belong to another person (a split or a correction). `to_person_id` `null` = unassigned; `to_name` `null` = the target is not a named person (yet) |
+| `merged` | `from_person_id`, `from_name`, `into_person_id`, `into_name`, `faces` | the person no longer exists and its faces went to `into_person_id` |
+| `deleted` | `person_id`, `name`, `reason` | `deleted` (no longer exists, faces went nowhere), `hidden`, or `unnamed` (name cleared) |
+
+Always store `next_cursor` (also when `changes` is empty) and call again at once while `has_more` is true.
+`resync_required: true` means your position is older than the log (cursor before the retention window, or a time
+before `tracking_since`): re-sync fully (below), then continue from the `changes_cursor` of `GET /v1/people`.
+
+### `POST /v1/people/resolve`
+
+Where stored person ids stand **now**: `{"person_ids": [...]}` (up to 1000) →
+
+```json
+{"people": [
+  {"person_id": "9a2d…", "status": "merged", "current_person_id": "6f1c…", "name": "Jane Example", "merged_via": ["6f1c…"],
+   "target_status": "current"},
+  {"person_id": "6f1c…", "status": "current", "current_person_id": "6f1c…", "name": "Jane Example"}
+], "change_log": true}
+```
+
+`status`: `current` (named, visible), `merged` (followed through up to 10 merges to `current_person_id`;
+`target_status` says whether that one is current, hidden or unnamed), `hidden`, `unnamed`, `deleted`, or `unknown`
+(not a person of the owner, and the change log has no record of it). Without the change log merges cannot be
+followed (`change_log: false`; a merged id is then `unknown`). Use it for a **full re-sync** of your id → member
+mapping, and whenever an id you hold does not appear in `GET /v1/people`.
 
 ### Health
 
@@ -375,14 +484,14 @@ Named, not hidden people of the owner, with their number of faces (for a "pick s
 
 | Status | `code` | When | Client action |
 | --- | --- | --- | --- |
-| 400 | `bad_request`, `invalid_image` | missing `image` field, bad query, undecodable file | fix the request; don't retry |
+| 400 | `bad_request`, `invalid_image` | missing `image` field or `person_id`, bad query or cursor, undecodable file | fix the request; don't retry |
 | 401 | `unauthorized` | missing or wrong key | check the key |
-| 404 | `not_found` | disabled endpoint | — |
+| 404 | `not_found` | disabled endpoint (`/v1/people/changes` without the store or with `FACE_API_CHANGES_INTERVAL=0`) | — |
 | 413 | `too_large`, `invalid_image` | over the size or pixel limit | send a web-size copy (3000 px is plenty) |
 | 415 | `invalid_image` | not JPEG/PNG/WebP/HEIC | convert first |
 | 429 | `rate_limited` | over the client's rate | wait `Retry-After` |
 | 502 | `upstream` | ML server or database failed | retry later |
-| 503 | `not_ready`, `busy` | version/schema mismatch, dependency down, or the ML queue is full | wait `Retry-After` |
+| 503 | `not_ready`, `busy` | version/schema mismatch, dependency down, the ML queue is full, or the change log is still building its first snapshot | wait `Retry-After` |
 
 ## Client examples
 
@@ -481,6 +590,96 @@ float16 matrix and searches it with one matrix product (numpy):
 
 **Thresholds.** `distance` is the same measure Immich uses for clustering. 0.5 matches Immich's default; a lower value
 (0.4–0.45) gives fewer but safer suggestions, which is usually right when a wrong public name is worse than none.
+
+## People changes
+
+Apps that store tags (photo → person) need to know when curators **merge**, **split**, **rename** or **delete** people
+in Immich, or their tags drift. Immich does not record that: its audit tables (`person_audit`, `person_group_audit`,
+`asset_face_audit`) only note **which row was deleted and when**. A merge is "move the faces, then delete the source
+person", a split is "move some faces to another person", a rename is an update of `person.name`: none of these says
+where faces went or what a person was called before.
+
+So the API keeps its own **snapshot** in the store and diffs it against Immich (`immich_face_api/changes.py`):
+
+- `people_snapshot`: the owner's named, not hidden people (id, name, face count);
+- `face_snapshot`: which of those people each counted face belongs to (two UUIDs per face, about 110 bytes with the
+  index; 750,000 faces ≈ 85 MB). No images, no embeddings.
+
+**A check** (every `FACE_API_CHANGES_INTERVAL` s, default 300; one process at a time through an advisory lock in the
+store, so any number of replicas is fine): in one consistent (repeatable-read) read on Immich, the owner's people, and
+the faces whose `asset_face.updateId` is newer than the last check minus `FACE_API_CHANGES_OVERLAP` (600 s). Immich
+renews `updateId` (a time-ordered UUIDv7, indexed) on every update of a face, so this is an index range scan of the
+recently changed faces, not of the library. Every `FACE_API_CHANGES_FULL_HOURS` (24) a **full reconcile** compares
+all faces of the named people instead (catches what an incremental check cannot see, see limits). Then, in one store
+transaction: compare, write the events, update the snapshot. Both sides are streamed with `COPY` (nothing large in
+memory). Measured on ~760,000 named faces: first snapshot 3 s, incremental check < 1 s, full reconcile ~6 s.
+
+**What becomes an event** (in this order within a check):
+
+| Event | Derived from |
+| --- | --- |
+| `created` | a person is in the named set now and was not at the last check |
+| `renamed` | same person id, different name |
+| `faces_moved` | faces that the snapshot had under a named person now belong to another person or none; counted per (from, to) pair |
+| `merged` | the person row is gone **and** some of its faces moved to another person in the same window: the target with the most faces |
+| `deleted` | the person row is gone and its faces went nowhere (`deleted`), or it was hidden (`hidden`) or its name cleared (`unnamed`) |
+
+**Guarantees**
+
+- Events are totally ordered (`cursor`), written atomically per check, and each appears once; reading with the last
+  `next_cursor` never skips or repeats one.
+- Every rename, merge, deletion, hide/un-hide and every move of a face away from a named person that is still visible
+  at a check is reported (the full reconcile catches moves an incremental check missed, at the latest
+  `FACE_API_CHANGES_FULL_HOURS` later).
+- `merged` and `faces_moved` refer to person ids as Immich has them (the person **group** id, the same `person_id`
+  identify returns); names are those at the time of the check.
+
+**Limits**
+
+- **Granularity is one check.** `at` is when the change was seen; it happened after `after` (the previous check).
+  Several edits within one window collapse into the net change (rename A→B→C shows as one rename A→C; a face moved
+  A→B→A shows nothing; a merge right after a split shows as moves).
+- **`faces_moved.count` is per window and pair**, not per curator action, and counts only faces that count for
+  matching (not deleted, visible, asset not trashed/locked). Faces moving **into** a named person from nobody (new
+  recognitions) or from an unnamed cluster are not events.
+- **Only the named set is tracked.** Changes among unnamed clusters are invisible until a cluster gets a name
+  (`created`). A merge **into** an unnamed person usually brings the name along (Immich copies it), so it appears as
+  `created` + `merged`.
+- **Nothing before `tracking_since`** (the first snapshot) is known. Changing `FACE_API_OWNER_ID` starts over (events
+  dropped, clients get `resync_required`).
+- Assets trashed or moved to the locked folder do not renew `updateId`; their faces leave the snapshot silently at the
+  next full reconcile (no event: the person did not change).
+- A transaction in Immich that commits more than `FACE_API_CHANGES_OVERLAP` after it changed a face is seen only by the
+  full reconcile.
+- "Reset people" / re-clustering in Immich unassigns all faces: expect a `faces_moved` (to `null`) and a `deleted` for
+  every person.
+- Events are kept `FACE_API_CHANGES_RETENTION_DAYS` (365); older cursors get `resync_required`.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `FACE_API_CHANGES_INTERVAL` | `300` | seconds between checks; `0` = off (needs `FACE_API_STORE_URL`) |
+| `FACE_API_CHANGES_OVERLAP` | `600` | re-read faces changed this long before the last check |
+| `FACE_API_CHANGES_FULL_HOURS` | `24` | full reconcile interval |
+| `FACE_API_CHANGES_RETENTION_DAYS` | `365` | event retention |
+| `FACE_API_VERIFY_MAX_CLAIMS` | `10` | person ids per verify call |
+| `FACE_API_VERIFY_BATCH_MAX` | `10` | photos per verify batch |
+
+Metrics: `face_api_people_change_checks_total{mode}`, `face_api_people_change_events_total{type}`,
+`face_api_people_change_errors_total`, `face_api_people_change_last_check_timestamp_seconds` (alert when it lags),
+`face_api_verify_claims_total{verdict}`. The admin UI has a *Changes* page (status, events, filters) and shows the
+latest changes on the dashboard.
+
+### Keeping tags right (for apps)
+
+1. Store **confirmed** tags as photo → *your* member/subject id, and separately a mapping Immich `person_id` → member
+   (one member may have several person ids). Staff-confirmed tags are authoritative; suggestions are not.
+2. Nightly: `GET /v1/people/changes?since=<saved cursor>` until `has_more` is false; save `next_cursor`.
+   `renamed` → update names; `merged` → re-point mappings of `from_person_id` to `into_person_id`; `faces_moved` →
+   re-check **unconfirmed** tags of `from_person_id` with `/v1/verify` (and offer `to_person_id` to staff);
+   `deleted` → stop suggesting, flag confirmed tags for review; `created` → map to a member.
+3. `resync_required` or a new installation: `GET /v1/people` (save `changes_cursor`) + `POST /v1/people/resolve` with
+   every person id you hold.
+4. Re-check old or unconfirmed tags with `/v1/verify` (or the batch form), a few hundred a night within the rate limit.
 
 ## Security model
 
@@ -585,6 +784,8 @@ your server.
 - One library owner per instance.
 - The in-memory face cache costs about 1 KiB per cached face per process (default cap: 100 faces per person).
 - Rate limits are per replica (in memory), not global.
+- The people change log works in windows of `FACE_API_CHANGES_INTERVAL` and knows nothing before it started; see
+  [People changes](#people-changes) for its exact limits.
 - Face recognition is not perfect: twins, children growing up, masks, profile views and tiny or blurred faces cause
   misses and wrong suggestions. Always keep a human in the loop.
 - Animated images: only the first frame is analysed. Videos are not supported.

@@ -1,13 +1,17 @@
-"""HTTP API: POST /v1/identify, GET /v1/people, GET /healthz, GET /readyz."""
+"""HTTP API: POST /v1/identify, POST /v1/verify (+ /batch), GET /v1/people, GET /v1/people/changes,
+POST /v1/people/resolve, GET /healthz, GET /readyz."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import email.parser
 import email.policy
 import json
 import logging
+import re
 import sys
 import time
 import uuid
@@ -21,12 +25,13 @@ from prometheus_client import start_http_server
 from psycopg_pool import PoolTimeout
 
 from . import __version__
+from . import changes as ch
 from . import metrics as m
 from .config import Settings
 from .db import Database, SchemaMismatch
 from .facecache import FaceCache, same_person_rule
 from .imaging import ImageRejected, prepare
-from .matching import decide, normalise_box
+from .matching import decide, name_key, normalise_box
 from .ml import MLClient, MLError
 from .openapi import OPENAPI_SPEC
 from .requestlog import FaceRecord, RequestLogWriter, RequestRecord, embedding_bytes, kind_of, make_crop, wants_crop
@@ -108,21 +113,93 @@ async def read_body(request: Request, limit: int) -> bytes:
 
 def extract_image(content_type: str, body: bytes) -> bytes:
     """The image bytes from a multipart/form-data body (field "image") or a raw body."""
+    image, _fields = extract_form(content_type, body)
+    return image
+
+
+def extract_form(content_type: str, body: bytes, max_fields: int = 200) -> tuple[bytes, dict[str, list[str]]]:
+    """(image bytes, other small text fields) from a multipart/form-data body; a raw body is the image alone."""
     ctype = content_type.split(";", 1)[0].strip().lower()
     if ctype != "multipart/form-data":
-        return body
+        return body, {}
     if "boundary=" not in content_type:
         raise HttpError(400, "bad_request", "multipart body without boundary")
     head = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("latin-1")
     msg = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(head + body)
     if not msg.is_multipart():
         raise HttpError(400, "bad_request", "malformed multipart body")
+    image, fields, n = None, {}, 0
     for part in msg.iter_parts():
-        if part.get_param("name", header="content-disposition") == "image":
-            data = part.get_payload(decode=True)
-            if isinstance(data, bytes):
-                return data
-    raise HttpError(400, "bad_request", 'multipart field "image" is missing')
+        name = part.get_param("name", header="content-disposition")
+        data = part.get_payload(decode=True)
+        if not isinstance(data, bytes):
+            continue
+        if name == "image" and image is None:
+            image = data
+        elif isinstance(name, str) and len(data) <= 4096:
+            n += 1
+            if n > max_fields:
+                raise HttpError(400, "bad_request", "too many form fields")
+            fields.setdefault(name, []).append(data.decode("utf-8", "replace").strip())
+    if image is None:
+        raise HttpError(400, "bad_request", 'multipart field "image" is missing')
+    return image, fields
+
+
+_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def person_ids(values: list, limit: int, field: str = "person_id") -> list[str]:
+    """Validated, de-duplicated person ids (lower-case UUIDs; a value may hold several, comma-separated)."""
+    out = []
+    for v in values:
+        for part in str(v).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if not _UUID.fullmatch(part):
+                raise HttpError(400, "bad_request", f"{field}: not a person id (UUID)")
+            out.append(part.lower())
+    out = list(dict.fromkeys(out))
+    if not out:
+        raise HttpError(400, "bad_request", f"at least one {field} is required")
+    if len(out) > limit:
+        raise HttpError(400, "bad_request", f"at most {limit} {field} per request")
+    return out
+
+
+def parse_box(value) -> dict | None:
+    """A face box as identify returns it: {"x","y","w","h"} fractions 0..1, as an object, JSON text or "x,y,w,h"."""
+    if value is None or value == "":
+        return None
+    try:
+        if isinstance(value, str):
+            text = value.strip()
+            value = json.loads(text) if text.startswith("{") else dict(zip("xywh", text.split(","), strict=True))
+        box = {k: float(value[k]) for k in ("x", "y", "w", "h")}
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HttpError(400, "bad_request", 'box must be {"x","y","w","h"} fractions, as returned by identify') from exc
+    if not all(0.0 <= v <= 1.0 for v in box.values()) or box["w"] <= 0 or box["h"] <= 0:
+        raise HttpError(400, "bad_request", "box values must be fractions between 0 and 1")
+    return box
+
+
+def iou(a: dict, b: dict) -> float:
+    """Intersection over union of two {x,y,w,h} boxes."""
+    ix = max(0.0, min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"]))
+    iy = max(0.0, min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"]))
+    inter = ix * iy
+    union = a["w"] * a["h"] + b["w"] * b["h"] - inter
+    return inter / union if union > 0 else 0.0
+
+
+# a box from an earlier identify selects the detected face that overlaps it at least this much
+BOX_MIN_IOU = 0.3
+
+
+def _comparable(r: dict) -> bool:
+    """A resolved claim that points at a current (named, visible) person, directly or through merges."""
+    return bool(r["current_person_id"]) and r.get("target_status", r["status"]) == "current"
 
 
 def db_failure(exc: Exception, rid: str, message: str) -> HttpError:
@@ -136,6 +213,9 @@ def db_failure(exc: Exception, rid: str, message: str) -> HttpError:
         )
     log.error("db error", exc_info=True, extra={"fields": {"rid": rid, "error": type(exc).__name__}})
     return HttpError(502, "upstream", message)
+
+
+LOGGED_ENDPOINTS = ("/v1/identify", "/v1/verify", "/v1/verify/batch")
 
 
 class State:
@@ -154,6 +234,20 @@ class State:
         self.store = (
             Store(settings.store_url, settings.store_password, settings.store_pool_size, settings.key_cache_seconds)
             if settings.store_url
+            else None
+        )
+        # people change log (store + interval > 0); the checks run in the API process only, one at a time
+        self.tracker = (
+            ch.ChangeTracker(
+                self.db,
+                self.store,
+                interval=settings.changes_interval,
+                overlap=settings.changes_overlap,
+                full_hours=settings.changes_full_hours,
+                retention_days=settings.changes_retention_days,
+                ready=lambda: self.ready,
+            )
+            if self.store and settings.changes_interval > 0
             else None
         )
         # request log: only for the API process (the admin's "Try it" is never logged)
@@ -196,6 +290,12 @@ class State:
         """The whole pipeline for one image (validate, detect, search, decide). Raises HttpError.
 
         log_faces: also return "_log" (per-face records for the request log, with crops per FACE_API_STORE_CROPS)."""
+        img, faces = await self._detect(raw, rid)
+        del raw
+        return await self._identify_faces(img, faces, candidates, include_unnamed, rid, log_faces)
+
+    async def _detect(self, raw: bytes, rid: str):
+        """Validate + normalise the image, then detect faces and embed them with Immich's ML. Raises HttpError."""
         s = self.s
         state = self
         t0 = time.perf_counter()
@@ -227,7 +327,11 @@ class State:
             m.INFLIGHT.dec()
             state.ml_slots.release()
         m.STAGE.labels("ml").observe(time.perf_counter() - t1)
+        return img, faces
 
+    async def _identify_faces(self, img, faces, candidates, include_unnamed, rid, log_faces) -> dict:
+        s = self.s
+        state = self
         t2 = time.perf_counter()
         embeddings = [f.embedding for f in faces]
         try:
@@ -330,6 +434,128 @@ class State:
             await asyncio.to_thread(cut)
         return records
 
+    async def verify(self, raw: bytes, claims: list[str], box: dict | None = None, rid: str = "") -> dict:
+        """Re-check claimed people (e.g. stored tags) against a photo. Raises HttpError. See README "POST /v1/verify"."""
+        s = self.s
+        img, faces = await self._detect(raw, rid)
+        del raw
+        t2 = time.perf_counter()
+        faces = sorted(faces, key=lambda f: (f.box["x1"], f.box["y1"]))
+        boxes = [normalise_box(f.box, img.sent_width, img.sent_height) for f in faces]
+        embeddings = [f.embedding for f in faces]
+        try:
+            resolved = await ch.resolve(self.db, self.store if self.tracker else None, claims)
+            targets = sorted({r["current_person_id"] for r in resolved.values() if _comparable(r)})
+            same_person = None
+            if self.faces is not None and self.faces.ready:
+                dists = await self.faces.distances(embeddings, targets)
+                neighbours = await self.faces.nearest(embeddings)
+                same_person = same_person_rule(self.faces.snap, s.same_name_max_distance)
+            else:
+                dists = await self.db.claim_distances(embeddings, targets, s.face_cache_per_person)
+                neighbours = await self.db.nearest(embeddings)
+        except Exception as exc:  # noqa: BLE001
+            raise db_failure(exc, rid, "verification failed") from exc
+        m.STAGE.labels("db").observe(time.perf_counter() - t2)
+
+        decisions = [
+            decide(
+                rows,
+                max_distance=s.max_distance,
+                max_candidates=s.max_candidates,
+                ambiguity_margin=s.ambiguity_margin,
+                same_person=same_person,
+            )
+            for rows in neighbours
+        ]
+        out_faces = [
+            {
+                "box": b,
+                "detection_score": round(f.score, 4),
+                "person_id": d.best.person_id if d.best else None,
+                "name": d.best.name if d.best else None,
+                "distance": d.best.distance if d.best else None,
+                "ambiguous": d.ambiguous,
+            }
+            for f, b, d in zip(faces, boxes, decisions, strict=True)
+        ]
+        if box is not None:
+            scored = sorted(((iou(b, box), i) for i, b in enumerate(boxes)), reverse=True)
+            pool = [scored[0][1]] if scored and scored[0][0] >= BOX_MIN_IOU else []
+        else:
+            pool = list(range(len(faces)))
+
+        out_claims, matched = [], 0
+        for pid in claims:
+            r = resolved[pid]
+            target = r["current_person_id"] if _comparable(r) else None
+            entry = {
+                "person_id": pid,
+                "status": r["status"],
+                "current_person_id": r["current_person_id"],
+                "name": r["name"],
+                **({"merged_via": r["merged_via"]} if r.get("merged_via") else {}),
+                "verdict": None,
+                "within_threshold": False,
+                "distance": None,
+                "confidence": None,
+                "face": None,
+                "box": None,
+                "best_person_id": None,
+                "best_name": None,
+            }
+            scored = [(dists[i][target], i) for i in pool if target in dists[i]] if target else []
+            if target is None:
+                verdict = "person_gone"
+            elif not pool:
+                verdict = "no_face"
+            elif not scored:
+                verdict = "no_reference"  # the person has no face left to compare with
+            else:
+                dist, i = min(scored)
+                best = decisions[i].best
+                same = best is not None and (
+                    best.person_id == target
+                    or (
+                        same_person is not None
+                        and name_key(best.name) == name_key(r["name"])
+                        and same_person(best.person_id, target)
+                    )
+                )
+                within = dist <= s.max_distance
+                verdict = "no_match" if not within else ("match" if same else "match_not_best")
+                matched += int(verdict == "match")
+                entry.update(
+                    face=i,
+                    box=boxes[i],
+                    distance=round(dist, 4),
+                    confidence=round(max(0.0, min(1.0, 1.0 - dist)), 4),
+                    within_threshold=within,
+                    best_person_id=best.person_id if best else None,
+                    best_name=best.name if best else None,
+                )
+            entry["verdict"] = verdict
+            m.VERIFY_CLAIMS.labels(verdict).inc()
+            out_claims.append(entry)
+        width, height, source_format = img.width, img.height, img.source_format
+        del img
+        m.FACES.inc(len(faces))
+        return {
+            "claims": out_claims,
+            "faces": out_faces,
+            "image": {"w": width, "h": height},
+            "model": s.face_model,
+            "max_distance": s.max_distance,
+            "immich_version": self.db.status.immich_version,
+            "_stats": {
+                "faces": len(faces),
+                "matched": sum(1 for d in decisions if d.best),
+                "ambiguous": sum(1 for d in decisions if d.best and d.ambiguous),
+                "claims_matched": matched,
+                "format": source_format,
+            },
+        }
+
     async def readiness_loop(self) -> None:
         while True:
             await self.refresh_readiness()
@@ -360,6 +586,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if settings.request_log:
                 state.writer = RequestLogWriter(state.store)
                 tasks.append(asyncio.create_task(state.writer.loop()))
+            if state.tracker is not None:
+                tasks.append(asyncio.create_task(state.tracker.loop()))
         log.info(
             "started",
             extra={
@@ -373,6 +601,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "store": bool(settings.store_url),
                     "request_log": bool(settings.store_url and settings.request_log),
                     "store_crops": settings.store_crops if settings.store_url and settings.request_log else "none",
+                    "people_changes": bool(settings.store_url and settings.changes_interval),
                     "test_mode": settings.test_mode,
                 }
             },
@@ -433,7 +662,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ambiguous=f.get("ambiguous", 0),
             )
         writer = request.app.state.face.writer
-        if writer and request.state.client != "-" and endpoint == "/v1/identify":
+        if writer and request.state.client != "-" and endpoint in LOGGED_ENDPOINTS:
             writer.submit(request_record(request, endpoint, response.status_code, elapsed))
         m.LATENCY.labels(endpoint).observe(elapsed)
         response.headers["X-Request-Id"] = request.state.rid
@@ -457,7 +686,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return response
 
-    async def authenticate(request: Request) -> str:
+    async def authenticate(request: Request, cost: float = 1.0) -> str:
         """API key first (env keys, then store keys), then the rate limit, then readiness. Runs before the body is
         read and before any ML or Immich call."""
         state: State = request.app.state.face
@@ -480,7 +709,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             m.REJECTED.labels("auth").inc()
             raise HttpError(401, "unauthorized", "missing or invalid API key", {"WWW-Authenticate": "Bearer"})
         request.state.client = client
-        allowed, retry_after = state.limiter.take(client, per_minute)
+        allowed, retry_after = state.limiter.take(client, per_minute, cost)
         if not allowed:
             m.REJECTED.labels("rate_limit").inc()
             raise HttpError(429, "rate_limited", "too many requests", {"Retry-After": str(retry_after)})
@@ -548,13 +777,172 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             state: State = request.app.state.face
             if not state.s.enable_people:
                 raise HttpError(404, "not_found", "not found")
+            cursor = None
+            if state.tracker is not None:  # read BEFORE the people: events after it may already be in the list
+                with contextlib.suppress(Exception):
+                    cursor = await ch.latest_cursor(state.store)
             try:
                 rows = await state.db.people()
             except Exception as exc:  # noqa: BLE001
                 raise db_failure(exc, request.state.rid, "people lookup failed") from exc
             request.state.fields = {"people": len(rows)}
-            return {"people": rows, "count": len(rows)}
+            return {"people": rows, "count": len(rows), **({"changes_cursor": cursor} if state.tracker else {})}
         except HttpError as exc:
+            return error_response(exc)
+
+    @app.get("/v1/people/changes")
+    async def people_changes(request: Request):
+        try:
+            await authenticate(request)
+            state: State = request.app.state.face
+            if state.tracker is None or not state.s.enable_people:
+                raise HttpError(404, "not_found", "the people change log is not enabled")
+            limit = _int_param(request, "limit", 500, 1, 5000)
+            since = request.query_params.get("since") or request.query_params.get("cursor")
+            try:
+                after_id, after_time = ch.parse_since(since)
+            except ValueError as exc:
+                raise HttpError(
+                    400, "bad_request", "since must be a cursor (pc_...) or an ISO-8601 time with zone"
+                ) from exc
+            try:
+                st = await ch.tracker_status(state.store)
+                if st is None:
+                    raise HttpError(503, "not_ready", "the people change log is starting", {"Retry-After": "60"})
+                if after_id is not None and after_id > max(st["last_id"], st["purged_through"]):
+                    raise HttpError(400, "bad_request", "unknown cursor")
+                rows = await ch.list_changes(state.store, after_id=after_id, after_time=after_time, limit=limit + 1)
+            except HttpError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.warning("change log read failed", extra={"fields": {"rid": request.state.rid}})
+                raise HttpError(
+                    503, "busy", "the change log is not available, retry later", {"Retry-After": "30"}
+                ) from exc
+            has_more = len(rows) > limit
+            rows = rows[:limit]
+            resync = (after_id is not None and after_id < st["purged_through"]) or (
+                after_time is not None and after_time < st["started_at"]
+            )
+            if rows:
+                nxt = ch.cursor_of(rows[-1]["id"])
+            elif after_id:
+                nxt = ch.cursor_of(after_id)
+            else:
+                nxt = ch.cursor_of(max(st["last_id"], st["purged_through"]))
+            request.state.fields = {"changes": len(rows)}
+            return {
+                "changes": [ch.event_json(r) for r in rows],
+                "next_cursor": nxt,
+                "has_more": has_more,
+                "resync_required": resync,
+                "tracking_since": ch._iso(st["started_at"]),
+                "checked_at": ch._iso(st["checked_at"]),
+            }
+        except HttpError as exc:
+            return error_response(exc)
+
+    @app.post("/v1/people/resolve")
+    async def people_resolve(request: Request):
+        try:
+            await authenticate(request)
+            state: State = request.app.state.face
+            if not state.s.enable_people:
+                raise HttpError(404, "not_found", "not found")
+            body = await read_body(request, 256 * 1024)
+            try:
+                data = json.loads(body or b"{}")
+                ids = data.get("person_ids") if isinstance(data, dict) else None
+                if not isinstance(ids, list):
+                    raise ValueError
+            except ValueError as exc:
+                raise HttpError(400, "bad_request", 'body must be JSON {"person_ids": [...]}') from exc
+            ids = person_ids(ids, 1000, "person_ids")
+            try:
+                out = await ch.resolve(state.db, state.store if state.tracker else None, ids)
+            except Exception as exc:  # noqa: BLE001
+                raise db_failure(exc, request.state.rid, "resolve failed") from exc
+            request.state.fields = {"people": len(ids)}
+            return {"people": [{"person_id": p, **out[p]} for p in ids], "change_log": state.tracker is not None}
+        except HttpError as exc:
+            return error_response(exc)
+
+    @app.post("/v1/verify")
+    async def verify(request: Request):
+        try:
+            await authenticate(request)
+            state: State = request.app.state.face
+            s = state.s
+            body = await read_body(request, s.max_upload_bytes)
+            raw, fields = extract_form(request.headers.get("content-type", ""), body)
+            del body
+            q = request.query_params
+            claims = person_ids(fields.get("person_id", []) + q.getlist("person_id"), s.verify_max_claims)
+            box = parse_box((fields.get("box") or [q.get("box")])[0])
+            request.state.log = {"image_bytes": len(raw)}
+            result = await state.verify(raw, claims, box, rid=request.state.rid)
+            del raw
+            stats = result.pop("_stats")
+            request.state.fields = {**stats, "claims": len(claims)}
+            request.state.log = {**request.state.log, "image": result["image"], "format": stats["format"], "faces": []}
+            return result
+        except HttpError as exc:
+            request.state.log = {**(request.state.log or {}), "error_code": exc.code}
+            return error_response(exc)
+
+    @app.post("/v1/verify/batch")
+    async def verify_batch(request: Request):
+        """Several photos in one JSON body (base64), each with its claims; one rate-limit token per photo."""
+        try:
+            state: State = request.app.state.face
+            s = state.s
+            await authenticate(request)  # one token now (before the body is read), the rest below
+            body = await read_body(request, s.max_upload_bytes)
+            try:
+                data = json.loads(body)
+                items = data.get("items") if isinstance(data, dict) else None
+                if not isinstance(items, list) or not items:
+                    raise ValueError
+            except ValueError as exc:
+                raise HttpError(400, "bad_request", 'body must be JSON {"items": [...]}') from exc
+            del body
+            if len(items) > s.verify_batch_max:
+                raise HttpError(400, "bad_request", f"at most {s.verify_batch_max} items per batch")
+            if len(items) > 1:  # the rest of the tokens: one per photo
+                allowed, retry_after = state.limiter.take(request.state.client, None, len(items) - 1)
+                if not allowed:
+                    m.REJECTED.labels("rate_limit").inc()
+                    raise HttpError(429, "rate_limited", "too many requests", {"Retry-After": str(retry_after)})
+            results, faces, matched, total_bytes = [], 0, 0, 0
+            for item in items:
+                ref = item.get("ref") if isinstance(item, dict) else None
+                ref = str(ref)[:200] if ref is not None else None
+                try:
+                    if not isinstance(item, dict) or not isinstance(item.get("image"), str):
+                        raise HttpError(400, "bad_request", "each item needs image (base64)")
+                    try:
+                        raw = base64.b64decode(item["image"], validate=True)
+                    except (binascii.Error, ValueError) as exc:
+                        raise HttpError(400, "bad_request", "image is not valid base64") from exc
+                    total_bytes += len(raw)
+                    claims = person_ids(item.get("person_ids") or [], s.verify_max_claims, "person_ids")
+                    box = parse_box(item.get("box"))
+                    result = await state.verify(raw, claims, box, rid=request.state.rid)
+                    del raw
+                    stats = result.pop("_stats")
+                    faces += stats["faces"]
+                    matched += stats["matched"]
+                    results.append({"ref": ref, **result})
+                except HttpError as exc:
+                    if exc.status in (429, 502, 503):  # the service, not the item: stop here
+                        raise
+                    results.append({"ref": ref, "error": {"code": exc.code, "message": exc.message}})
+                item.clear()
+            request.state.fields = {"faces": faces, "matched": matched, "items": len(items)}
+            request.state.log = {"image_bytes": total_bytes, "faces": []}
+            return {"items": results}
+        except HttpError as exc:
+            request.state.log = {**(request.state.log or {}), "error_code": exc.code}
             return error_response(exc)
 
     return app

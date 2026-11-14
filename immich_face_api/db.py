@@ -40,6 +40,7 @@ EXPECTED_COLUMNS: dict[tuple[str, str], str] = {
     ("asset_face", "assetDeletedAt"): "timestamp with time zone",
     ("asset_face", "assetVisibility"): "asset_visibility_enum",
     ("asset_face", "updatedAt"): "timestamp with time zone",
+    ("asset_face", "updateId"): "uuid",  # people change log: faces changed since a check
     ("face_search", "faceId"): "uuid",
     ("face_search", "embedding"): "vector(512)",
     ("version_history", "version"): "character varying",
@@ -131,6 +132,27 @@ WHERE af."ownerId" = %(owner)s AND NOT p."isHidden" AND"""
     + """
 GROUP BY p."personGroupId", p.name
 ORDER BY min(nn.distance)
+"""
+)
+
+
+# min distance from each query embedding to a sample of each claimed person's faces (same stable sample as the cache)
+_CLAIM_SQL = (
+    """
+WITH s AS MATERIALIZED (
+  SELECT person_id, id FROM (
+    SELECT af."personGroupId"::text AS person_id, af.id,
+           row_number() OVER (PARTITION BY af."personGroupId" ORDER BY md5(af.id::text)) AS rn
+    FROM asset_face af
+    WHERE af."ownerId" = %(owner)s AND af."personGroupId" = ANY(%(ids)s::uuid[]) AND"""
+    + _FACE_FILTER
+    + """
+  ) x WHERE rn <= %(cap)s
+),
+q(idx, e) AS (SELECT * FROM unnest(%(idx)s::int[], %(emb)s::text[]::vector[]))
+SELECT q.idx, s.person_id, min(fs.embedding <=> q.e)::float8
+FROM q CROSS JOIN s JOIN face_search fs ON fs."faceId" = s.id
+GROUP BY q.idx, s.person_id
 """
 )
 
@@ -286,3 +308,36 @@ class Database:
             {"person_id": pid, "name": name or None, "distance": round(float(d), 4), "faces": int(n)}
             for pid, name, d, n in rows[:limit]
         ]
+
+    async def persons_by_id(self, person_ids: list[str]) -> dict[str, tuple[str, bool]]:
+        """{person_id: (name, hidden)} for those of the ids that are people of the owner."""
+        if not person_ids:
+            return {}
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    'SELECT "personGroupId"::text, name, "isHidden" FROM person '
+                    'WHERE "ownerId" = %s AND "personGroupId" = ANY(%s::uuid[])',
+                    (self.status.owner_id, person_ids),
+                )
+                return {pid: (name or "", bool(hidden)) for pid, name, hidden in await cur.fetchall()}
+
+    async def claim_distances(self, embeddings: list[str], person_ids: list[str], per_person: int) -> list[dict]:
+        """For each query embedding: {person_id: min cosine distance} to up to per_person faces of each given person
+        (the cache's stable sample). Used by /v1/verify when the face cache is off or still loading."""
+        out: list[dict] = [{} for _ in embeddings]
+        if not embeddings or not person_ids:
+            return out
+        params = {
+            "owner": self.status.owner_id,
+            "ids": person_ids,
+            "cap": per_person,
+            "idx": list(range(len(embeddings))),
+            "emb": embeddings,
+        }
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_CLAIM_SQL, params)
+                for idx, pid, distance in await cur.fetchall():
+                    out[idx][pid] = max(0.0, float(distance))
+        return out

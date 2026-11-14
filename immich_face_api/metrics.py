@@ -30,3 +30,8 @@ REQUEST_LOG_WRITTEN = Counter("face_api_request_log_written_total", "Requests wr
 REQUEST_LOG_DROPPED = Counter(
     "face_api_request_log_dropped_total", "Request log entries dropped (store down or queue full)", ["reason"]
 )
+CHANGES_CHECKS = Counter("face_api_people_change_checks_total", "People change-log checks", ["mode"])
+CHANGES_EVENTS = Counter("face_api_people_change_events_total", "People change events written", ["type"])
+CHANGES_ERRORS = Counter("face_api_people_change_errors_total", "Failed people change-log checks")
+CHANGES_LAST_CHECK = Gauge("face_api_people_change_last_check_timestamp_seconds", "Last successful change-log check")
+VERIFY_CLAIMS = Counter("face_api_verify_claims_total", "Claims checked by /v1/verify", ["verdict"])

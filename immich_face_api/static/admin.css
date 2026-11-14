@@ -179,3 +179,4 @@ input[type=date] { background: var(--bg); border: 1px solid var(--line); border-
   .faces { grid-template-columns: 1fr; }
   img.crop, .crop.none { width: 96px; height: 96px; }
 }
+.error-text { color: var(--bad); }

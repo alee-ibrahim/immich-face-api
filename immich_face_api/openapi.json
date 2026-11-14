@@ -4,7 +4,7 @@
     "title": "immich-face-api",
     "version": "0.1.0",
     "summary": "Who is in this photo? Faces matched against the named people of an Immich library.",
-    "description": "Server-to-server API. Every /v1 call needs the API key, as `Authorization: Bearer <key>` or `X-API-Key: <key>`. Results are suggestions for a human to confirm. Nothing is stored.",
+    "description": "Server-to-server API. Every /v1 call needs the API key, as `Authorization: Bearer <key>` or `X-API-Key: <key>`. Results are suggestions for a human to confirm. Uploaded photos are never stored.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -179,6 +179,268 @@
         }
       }
     },
+    "/v1/verify": {
+      "post": {
+        "operationId": "verify",
+        "summary": "Re-check claimed people (stored tags) against a photo",
+        "description": "Detects the faces like identify, then for each claimed person: the distance from the nearest face (or the face at `box`) to that person's faces, whether it is within the threshold, and the best person for that face now. Merged people are followed to their merge target.",
+        "parameters": [
+          {
+            "name": "person_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
+            "style": "form",
+            "explode": true,
+            "description": "Claimed person(s), for a raw-image body (with multipart, use form fields). Repeat or comma-separate; at most FACE_API_VERIFY_MAX_CLAIMS (10)"
+          },
+          {
+            "name": "box",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional: only the face at this box (from an earlier identify), as `x,y,w,h` or JSON"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "image",
+                  "person_id"
+                ],
+                "properties": {
+                  "image": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "person_id": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  },
+                  "box": {
+                    "type": "string",
+                    "description": "x,y,w,h or JSON, from an earlier identify"
+                  }
+                }
+              }
+            },
+            "image/jpeg": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/png": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/webp": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/heic": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One result per claimed person",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyResponse"
+                },
+                "example": {
+                  "claims": [
+                    {
+                      "person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10",
+                      "status": "current",
+                      "current_person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10",
+                      "name": "Jane Example",
+                      "verdict": "match",
+                      "within_threshold": true,
+                      "distance": 0.29,
+                      "confidence": 0.71,
+                      "face": 0,
+                      "box": {
+                        "x": 0.412,
+                        "y": 0.18,
+                        "w": 0.061,
+                        "h": 0.103
+                      },
+                      "best_person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10",
+                      "best_name": "Jane Example"
+                    }
+                  ],
+                  "faces": [
+                    {
+                      "box": {
+                        "x": 0.412,
+                        "y": 0.18,
+                        "w": 0.061,
+                        "h": 0.103
+                      },
+                      "detection_score": 0.83,
+                      "person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10",
+                      "name": "Jane Example",
+                      "distance": 0.29,
+                      "ambiguous": false
+                    }
+                  ],
+                  "image": {
+                    "w": 6000,
+                    "h": 4000
+                  },
+                  "model": "buffalo_l",
+                  "max_distance": 0.5,
+                  "immich_version": "3.4.1"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/verify/batch": {
+      "post": {
+        "operationId": "verifyBatch",
+        "summary": "Re-check several photos at once (JSON, images in base64)",
+        "description": "At most FACE_API_VERIFY_BATCH_MAX (10) items; the whole body within FACE_API_MAX_UPLOAD_BYTES. Costs one rate-limit token per item. A bad item gets its own `error`; the batch stops on 429/502/503.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "items"
+                ],
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "image",
+                        "person_ids"
+                      ],
+                      "properties": {
+                        "ref": {
+                          "type": "string",
+                          "description": "your id, echoed back"
+                        },
+                        "image": {
+                          "type": "string",
+                          "contentEncoding": "base64"
+                        },
+                        "person_ids": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "format": "uuid"
+                          }
+                        },
+                        "box": {
+                          "$ref": "#/components/schemas/Box"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One result per item, in order: a VerifyResponse plus `ref`, or {ref, error}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/v1/people": {
       "get": {
         "operationId": "listPeople",
@@ -193,6 +455,149 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/people/changes": {
+      "get": {
+        "operationId": "peopleChanges",
+        "summary": "People changes (created, renamed, faces moved, merged, deleted) since a cursor or time",
+        "description": "Needs the store (FACE_API_STORE_URL) and FACE_API_CHANGES_INTERVAL > 0. Events in order. Granularity: one check every FACE_API_CHANGES_INTERVAL seconds; within a check, moves are counted per (from, to) pair. Only the owner's named, not hidden people are tracked.",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A cursor (`pc_...`, from `next_cursor` or an event) or an ISO-8601 time with zone. Omitted: from the start of the log"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000,
+              "default": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Changes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangesResponse"
+                },
+                "example": {
+                  "changes": [
+                    {
+                      "cursor": "pc_41",
+                      "type": "created",
+                      "at": "2026-01-31T10:05:00Z",
+                      "after": "2026-01-31T10:00:00Z",
+                      "person_id": "0b7e3b7c-1a52-4d0e-9a9e-2f7c9a1d5e33",
+                      "name": "John Example"
+                    },
+                    {
+                      "cursor": "pc_42",
+                      "type": "faces_moved",
+                      "at": "2026-01-31T10:05:00Z",
+                      "after": "2026-01-31T10:00:00Z",
+                      "from_person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10",
+                      "from_name": "Jane Example",
+                      "to_person_id": "0b7e3b7c-1a52-4d0e-9a9e-2f7c9a1d5e33",
+                      "to_name": "John Example",
+                      "count": 212
+                    }
+                  ],
+                  "next_cursor": "pc_42",
+                  "has_more": false,
+                  "resync_required": false,
+                  "tracking_since": "2026-01-01T00:00:00Z",
+                  "checked_at": "2026-01-31T10:05:00Z"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/people/resolve": {
+      "post": {
+        "operationId": "resolvePeople",
+        "summary": "Where stored person ids stand now (current, merged into, hidden, unnamed, deleted)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "person_ids"
+                ],
+                "properties": {
+                  "person_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "maxItems": 1000
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One entry per id, in request order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolveResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
           },
           "401": {
             "$ref": "#/components/responses/Error"
@@ -532,6 +937,416 @@
           },
           "count": {
             "type": "integer"
+          },
+          "changes_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only with the change log: the newest change cursor, read before the list. Store it after a full re-sync and continue GET /v1/people/changes from it."
+          }
+        }
+      },
+      "Change": {
+        "type": "object",
+        "description": "One people change. Fields depend on `type`: created {person_id, name}; renamed {person_id, old_name, new_name}; faces_moved {from_person_id, from_name, to_person_id (null = unassigned), to_name (null = not a named person), count}; merged {from_person_id, from_name, into_person_id, into_name, faces}; deleted {person_id, name, reason: deleted | hidden | unnamed}.",
+        "required": [
+          "cursor",
+          "type",
+          "at"
+        ],
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "description": "Opaque position of this event; pass as `since` to continue after it"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "created",
+              "renamed",
+              "faces_moved",
+              "merged",
+              "deleted"
+            ]
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the change was seen"
+          },
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The change happened between `after` (the previous check) and `at`"
+          },
+          "person_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "old_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "new_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from_person_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "from_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to_person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "to_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "into_person_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "into_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "count": {
+            "type": "integer",
+            "description": "faces_moved: tracked faces that moved in this window"
+          },
+          "faces": {
+            "type": "integer",
+            "description": "merged: tracked faces that moved into the target"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "deleted",
+              "hidden",
+              "unnamed"
+            ]
+          }
+        }
+      },
+      "ChangesResponse": {
+        "type": "object",
+        "required": [
+          "changes",
+          "next_cursor",
+          "has_more",
+          "resync_required",
+          "tracking_since",
+          "checked_at"
+        ],
+        "properties": {
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Change"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "description": "Pass as `since` next time (also when `changes` is empty)"
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "More events wait: call again with next_cursor now"
+          },
+          "resync_required": {
+            "type": "boolean",
+            "description": "Your position is older than the log (retention, or before tracking started): re-sync fully from GET /v1/people + POST /v1/people/resolve, then continue from its changes_cursor"
+          },
+          "tracking_since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Changes before this are unknown"
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Immich state up to this time is reflected in the log"
+          }
+        }
+      },
+      "Resolved": {
+        "type": "object",
+        "required": [
+          "person_id",
+          "status",
+          "current_person_id",
+          "name"
+        ],
+        "properties": {
+          "person_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "current",
+              "merged",
+              "hidden",
+              "unnamed",
+              "deleted",
+              "unknown"
+            ],
+            "description": "current = named and visible; merged = merged into current_person_id (see target_status); hidden / unnamed = still exists but not offered; deleted; unknown = not a person of the owner and not in the change log"
+          },
+          "current_person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "merged_via": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "merged: the chain of merge targets"
+          },
+          "target_status": {
+            "type": "string",
+            "enum": [
+              "current",
+              "hidden",
+              "unnamed"
+            ]
+          }
+        }
+      },
+      "ResolveResponse": {
+        "type": "object",
+        "required": [
+          "people"
+        ],
+        "properties": {
+          "people": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Resolved"
+            }
+          },
+          "change_log": {
+            "type": "boolean",
+            "description": "false: merges cannot be followed (no change log)"
+          }
+        }
+      },
+      "Claim": {
+        "type": "object",
+        "required": [
+          "person_id",
+          "status",
+          "verdict",
+          "within_threshold"
+        ],
+        "properties": {
+          "person_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "current",
+              "merged",
+              "hidden",
+              "unnamed",
+              "deleted",
+              "unknown"
+            ],
+            "description": "current = named and visible; merged = merged into current_person_id (see target_status); hidden / unnamed = still exists but not offered; deleted; unknown = not a person of the owner and not in the change log"
+          },
+          "current_person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "merged_via": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "match",
+              "match_not_best",
+              "no_match",
+              "no_face",
+              "no_reference",
+              "person_gone"
+            ],
+            "description": "match = a face is within the threshold and that person is also the best match; match_not_best = within the threshold but another person is closer (review); no_match = no face within the threshold; no_face = no face (or none at `box`); no_reference = the person has no faces to compare with; person_gone = deleted, hidden, unnamed or unknown"
+          },
+          "within_threshold": {
+            "type": "boolean"
+          },
+          "distance": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "confidence": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "face": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "index into `faces` of the face compared"
+          },
+          "box": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Box"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "best_person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "best_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "VerifyFace": {
+        "type": "object",
+        "properties": {
+          "box": {
+            "$ref": "#/components/schemas/Box"
+          },
+          "detection_score": {
+            "type": "number"
+          },
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "distance": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "ambiguous": {
+            "type": "boolean"
+          }
+        }
+      },
+      "VerifyResponse": {
+        "type": "object",
+        "required": [
+          "claims",
+          "faces",
+          "image"
+        ],
+        "properties": {
+          "claims": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Claim"
+            }
+          },
+          "faces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VerifyFace"
+            }
+          },
+          "image": {
+            "type": "object",
+            "properties": {
+              "w": {
+                "type": "integer"
+              },
+              "h": {
+                "type": "integer"
+              }
+            }
+          },
+          "model": {
+            "type": "string"
+          },
+          "max_distance": {
+            "type": "number"
+          },
+          "immich_version": {
+            "type": "string"
           }
         }
       }
