@@ -154,6 +154,26 @@ def search(snap: Snapshot, queries: list[str], k: int, chunk: int = 65536) -> li
     return out
 
 
+def person_distances(snap: Snapshot, queries: list[str], person_ids: list[str]) -> list[dict[str, float]]:
+    """For each query embedding: {person_id: min cosine distance to that person's cached faces}, for the given people
+    that are in the cache (named, not hidden, with at least one face)."""
+    rows = [snap.index.get(p) if snap.index else None for p in person_ids]
+    wanted = [(p, r) for p, r in zip(person_ids, rows, strict=True) if r is not None]
+    out: list[dict[str, float]] = [{} for _ in queries]
+    if not queries or not wanted or snap.faces == 0:
+        return out
+    q = _normalise(np.stack([vector_from_pg(x) for x in queries]))
+    for pid, row in wanted:
+        block = snap.vectors[snap.person_idx == row].astype(np.float32)
+        if block.shape[0] == 0:
+            continue
+        d = 1.0 - q @ block.T  # (m, faces of this person)
+        best = d.min(axis=1)
+        for i, v in enumerate(best):
+            out[i][pid] = float(max(0.0, v))
+    return out
+
+
 class FaceCache:
     """Holds the current Snapshot; ``refresh`` rebuilds it from the database when the signature changed."""
 
@@ -204,6 +224,12 @@ class FaceCache:
         if snap is None:
             raise CacheNotReady()
         return await asyncio.to_thread(search, snap, queries, self.knn)
+
+    async def distances(self, queries: list[str], person_ids: list[str]) -> list[dict[str, float]]:
+        snap = self.snap
+        if snap is None:
+            raise CacheNotReady()
+        return await asyncio.to_thread(person_distances, snap, queries, person_ids)
 
 
 class CacheNotReady(RuntimeError):

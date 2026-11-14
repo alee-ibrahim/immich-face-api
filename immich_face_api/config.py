@@ -177,6 +177,15 @@ class Settings:
     crop_size: int = 160
     log_max_faces: int = 50  # faces logged (and cropped) per request at most
     near_margin: float = 0.05  # a match within this of max_distance counts as "near the threshold"
+    # people change log (needs the store): GET /v1/people/changes, /v1/people/resolve. 0 = off
+    changes_interval: int = 300  # seconds between checks
+    changes_overlap: int = 600  # re-read faces changed this long before the last check (late commits)
+    changes_full_hours: int = 24  # full reconcile this often
+    changes_retention_days: int = 365
+    # POST /v1/verify
+    verify_max_claims: int = 10
+    verify_batch_max: int = 10
+
     immich_url: str = ""  # Immich web URL for person links in the admin UI, e.g. https://photos.example.org
     similar_probes: int = 32  # vchordrq.probes for "find similar in Immich" (0: the database default)
 
@@ -272,6 +281,12 @@ class Settings:
             crop_size=_int("CROP_SIZE", 160, 64, 512),
             log_max_faces=_int("LOG_MAX_FACES", 50, 1, 500),
             near_margin=_float("NEAR_MARGIN", 0.05, 0.0, 1.0),
+            changes_interval=_int("CHANGES_INTERVAL", 300, 0, 86_400),
+            changes_overlap=_int("CHANGES_OVERLAP", 600, 0, 86_400),
+            changes_full_hours=_int("CHANGES_FULL_HOURS", 24, 1, 24 * 30),
+            changes_retention_days=_int("CHANGES_RETENTION_DAYS", 365, 7, 3650),
+            verify_max_claims=_int("VERIFY_MAX_CLAIMS", 10, 1, 100),
+            verify_batch_max=_int("VERIFY_BATCH_MAX", 10, 1, 100),
             immich_url=(_env("IMMICH_URL", "") or "").rstrip("/"),
             similar_probes=_int("SIMILAR_PROBES", 32, 0, 100_000),
         )

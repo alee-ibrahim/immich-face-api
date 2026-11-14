@@ -5,6 +5,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added (people changes and verify)
+- **People change log**: `GET /v1/people/changes?since=<cursor|ISO time>` returns, in order, `created`, `renamed`,
+  `faces_moved` (splits and reassignments, counted per window and person pair), `merged` and `deleted` (deleted /
+  hidden / unnamed) events for the owner's named people. Derived from a snapshot in the store (people and which named
+  person each face belongs to; ids only), diffed every `FACE_API_CHANGES_INTERVAL` (300 s) against faces with a newer
+  `asset_face."updateId"`, plus a daily full reconcile; one process at a time (advisory lock). Immich's audit tables
+  record only deletions, so they are not used; no new database grants. Store migration `003_people_changes.sql`.
+- `POST /v1/people/resolve`: where stored person ids stand now (current, merged into ..., hidden, unnamed, deleted,
+  unknown); `GET /v1/people` returns `changes_cursor` for a full re-sync.
+- `POST /v1/verify`: re-check claimed people (stored tags) against a photo: distance, within the threshold, verdict
+  (`match`, `match_not_best`, `no_match`, `no_face`, `no_reference`, `person_gone`) and the current best person;
+  optional `box` from an earlier identify; merges followed. `POST /v1/verify/batch` (JSON, base64, up to 10 photos,
+  one rate-limit token each). Logged as request lines only (no faces, no crops).
+- Admin: *Changes* page (status, events, filters by type and person) and recent changes on the dashboard; Docs page
+  sections for verify and changes.
+
 ### Added (labeler: titles)
 - `names.titles` / `names.keep_titles` in the labeler config: honorifics and titles are removed from the start and end
   of every name (folders, web cards, Wikidata, and at the single write point), kept titles are written one way

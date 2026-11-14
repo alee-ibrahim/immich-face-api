@@ -1,0 +1,23 @@
+{# One people_changes row as a table row; shared by changes.html and dashboard.html. person(id, name) links to Immich. #}
+{% macro person(pid, name) -%}
+  {%- if pid -%}
+    {%- set url = person_url(pid) -%}
+    {%- if url %}<a href="{{ url }}" target="_blank" rel="noopener noreferrer">{{ name or "(no name)" }}</a>{% else %}{{ name or "(no name)" }}{% endif %}
+    <span class="muted mono" title="{{ pid }}">{{ pid[:8] }}</span>
+  {%- else -%}<span class="muted">unassigned</span>{%- endif -%}
+{%- endmacro %}
+
+{% macro change_row(r) -%}
+<tr>
+  <td data-label="Seen (UTC)">{{ r.at.strftime("%Y-%m-%d %H:%M") }}</td>
+  <td data-label="Type"><span class="chip {{ {'created': 'good', 'renamed': '', 'faces_moved': 'warn', 'merged': 'warn', 'deleted': 'bad'}[r.type] }}">{{ r.type | replace("_", " ") }}</span></td>
+  <td class="wrap" data-label="Change">
+    {%- if r.type == "created" -%}{{ person(r.person_id | string, r.name) }}
+    {%- elif r.type == "renamed" -%}{{ person(r.person_id | string, r.name) }} <span class="muted">was</span> {{ r.old_name }}
+    {%- elif r.type == "faces_moved" -%}{{ r.faces }} face{{ "s" if r.faces != 1 }}: {{ person(r.person_id | string, r.name) }} → {{ person(r.to_person_id | string if r.to_person_id else None, r.to_name) }}
+    {%- elif r.type == "merged" -%}{{ person(r.person_id | string, r.name) }} → {{ person(r.to_person_id | string, r.to_name) }} <span class="muted">({{ r.faces }} faces)</span>
+    {%- else -%}{{ person(r.person_id | string, r.name) }} <span class="muted">({{ r.reason }})</span>{%- endif -%}
+  </td>
+  <td class="mono muted" data-label="Cursor">pc_{{ r.id }}</td>
+</tr>
+{%- endmacro %}

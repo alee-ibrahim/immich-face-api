@@ -21,7 +21,9 @@
   <a href="#authentication">Authentication</a>
   <a href="#identify">POST /v1/identify</a>
   <a href="#response">Response fields</a>
+  <a href="#verify">POST /v1/verify</a>
   <a href="#people">GET /v1/people</a>
+  {% if lim.changes %}<a href="#changes">GET /v1/people/changes</a>{% endif %}
   <a href="#health">GET /healthz</a>
   <a href="#limits">Limits</a>
   <a href="#errors">Errors</a>
@@ -171,7 +173,75 @@ const { faces } = await res.json();'),
   headers: { Authorization: `Bearer ${process.env.FACE_API_KEY}` },
 })).json();'),
 ]) }}
-{{ block('{"people": [{"person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "name": "Jane Example", "face_count": 42}], "count": 1}') }}
+{{ block('{"people": [{"person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "name": "Jane Example", "face_count": 42}], "count": 1' ~ (', "changes_cursor": "pc_41"' if lim.changes else '') ~ '}') }}
+{% endif %}
+
+<h2 id="verify"><span class="method post">POST</span> /v1/verify</h2>
+<p>Re-check stored tags: send a photo and the <code>person_id</code>(s) it is tagged with (at most {{ lim.verify_claims }}).
+For each claimed person you get the distance from the nearest face in the photo to that person's faces, whether it is
+within the threshold, and who the best match for that face is <b>now</b>. A <code>box</code> from an earlier identify
+compares only that face. Merged people are followed to the person they were merged into. Same key, limits and logging
+as identify; the photo is not stored.</p>
+{{ code([
+ ('curl', 'curl', 'curl -sS "' ~ base ~ '/v1/verify" -H "Authorization: Bearer $FACE_API_KEY" \\
+  -F image=@photo.jpg -F person_id=6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10 -F box=0.41,0.18,0.06,0.10'),
+ ('php', 'PHP / Laravel', '$r = Http::withToken(config(\'services.face_api.key\'))->timeout(120)
+    ->attach(\'image\', $bytes, \'photo.jpg\')
+    ->post(\'' ~ base ~ '/v1/verify\', [\'person_id\' => $tag->immich_person_id])
+    ->throw()->json();
+$claim = $r[\'claims\'][0];   // verdict: match | match_not_best | no_match | no_face | no_reference | person_gone'),
+]) }}
+<table class="kv">
+  <tr><th>verdict</th><th>Meaning</th><th>Suggested action</th></tr>
+  <tr><td><code>match</code></td><td>a face is within the threshold and that person is also the best match</td><td>keep the tag</td></tr>
+  <tr><td><code>match_not_best</code></td><td>within the threshold, but another person is closer (<code>best_person_id</code>)</td><td>ask staff</td></tr>
+  <tr><td><code>no_match</code></td><td>no face is within the threshold</td><td>ask staff (unconfirmed tags: drop)</td></tr>
+  <tr><td><code>no_face</code></td><td>no face found (or none at <code>box</code>)</td><td>ask staff</td></tr>
+  <tr><td><code>person_gone</code></td><td>the person was deleted, hidden or un-named (<code>status</code>)</td><td>see <a href="#changes">changes</a></td></tr>
+  <tr><td><code>no_reference</code></td><td>the person has no faces left to compare with</td><td>ask staff</td></tr>
+</table>
+<p><b>Batch:</b> <code>POST /v1/verify/batch</code> with JSON <code>{"items": [{"ref": "photo-1", "image": "&lt;base64&gt;",
+"person_ids": ["..."], "box": {...}}]}</code>, at most {{ lim.verify_batch }} photos and {{ lim.max_mb }} MiB per call; one
+rate-limit token per photo. Each item comes back with its <code>ref</code>, or with an <code>error</code> of its own.</p>
+
+{% if lim.changes %}
+<h2 id="changes"><span class="method get">GET</span> /v1/people/changes</h2>
+<p>What curators changed in the archive since your last sync, in order: <code>created</code> (a person named or un-hidden),
+<code>renamed</code>, <code>faces_moved</code> (a split or reassignment: <i>count</i> faces went from one person to another),
+<code>merged</code> (a person merged into another) and <code>deleted</code> (deleted, hidden or name cleared). Call it
+nightly with the <code>next_cursor</code> of the previous call; the first time, take <code>changes_cursor</code> from
+<code>GET /v1/people</code>.</p>
+{{ code([
+ ('curl', 'curl', 'curl -sS "' ~ base ~ '/v1/people/changes?since=$CURSOR" -H "Authorization: Bearer $FACE_API_KEY"'),
+ ('php', 'PHP / Laravel', '$page = Http::withToken(config(\'services.face_api.key\'))
+    ->get(\'' ~ base ~ '/v1/people/changes\', [\'since\' => $cursor, \'limit\' => 1000])->throw()->json();
+foreach ($page[\'changes\'] as $e) { /* apply, see the rules below */ }
+$cursor = $page[\'next_cursor\'];   // save it; repeat while $page[\'has_more\']'),
+]) }}
+{{ block('{"changes": [
+  {"cursor": "pc_42", "type": "faces_moved", "at": "2026-01-31T10:05:00Z", "after": "2026-01-31T10:00:00Z",
+   "from_person_id": "6f1c…", "from_name": "Jane Example", "to_person_id": "0b7e…", "to_name": "John Example", "count": 212},
+  {"cursor": "pc_43", "type": "merged", "at": "2026-01-31T10:05:00Z", "after": "2026-01-31T10:00:00Z",
+   "from_person_id": "9a2d…", "from_name": "J. Example", "into_person_id": "6f1c…", "into_name": "Jane Example", "faces": 40}],
+ "next_cursor": "pc_43", "has_more": false, "resync_required": false,
+ "tracking_since": "2026-01-01T00:00:00Z", "checked_at": "2026-01-31T10:05:00Z"}') }}
+<table class="kv">
+  <tr><th>Event</th><th>What to do with your tags</th></tr>
+  <tr><td><code>renamed</code></td><td>update the display name; tags stay (they hold the <code>person_id</code>)</td></tr>
+  <tr><td><code>merged</code></td><td>point mappings of <code>from_person_id</code> to <code>into_person_id</code></td></tr>
+  <tr><td><code>faces_moved</code></td><td>a person was split or corrected: <b>re-check</b> unconfirmed tags of <code>from_person_id</code> with <code>/v1/verify</code>; offer <code>to_person_id</code> as an alternative</td></tr>
+  <tr><td><code>deleted</code></td><td>stop suggesting it; keep staff-confirmed tags but flag them for review</td></tr>
+  <tr><td><code>created</code></td><td>new person to map to a member (and to re-run identify on untagged photos, if you want)</td></tr>
+</table>
+<p><b>Guarantees:</b> events are in order and each appears once; a check runs every {{ lim.changes_minutes }} minutes, so
+<code>at</code> is when the change was seen and it happened after <code>after</code>; several edits of a person in one
+window show as one net change; <code>count</code> is the number of that person's faces that moved in the window (the
+names are those at that time). Only named, visible people are tracked; changes before <code>tracking_since</code> are not
+known. If <code>resync_required</code> is true (your cursor is older than the {{ lim.changes_days }}-day log), re-sync
+from <code>GET /v1/people</code> and <code>POST /v1/people/resolve</code>, then continue from its <code>changes_cursor</code>.</p>
+<p><b>Where do my ids stand now?</b> <code>POST /v1/people/resolve</code> with <code>{"person_ids": [...]}</code> (up to
+1000) answers per id: <code>current</code>, <code>merged</code> (with the <code>current_person_id</code> it ended up in),
+<code>hidden</code>, <code>unnamed</code>, <code>deleted</code> or <code>unknown</code>.</p>
 {% endif %}
 
 <h2 id="health"><span class="method get">GET</span> /healthz</h2>
@@ -304,7 +374,8 @@ export async function identify(path, attempts = 3) {
 this deployment keeps:</p>
 <table class="kv">
   <tr><td>Hourly counts</td><td>requests, faces, matches, errors and latency per app and hour. No names. Kept for the usage retention (default 400 days)</td></tr>
-  <tr><td>Request log</td><td><b>{{ "on" if p.request_log else "off" }}</b>{% if p.request_log %}, kept <b>{{ p.request_days }} days</b>{% endif %}: per identify call the time, app, status or error code, latency, image size in bytes and pixels, the number of faces matched, unknown, ambiguous and near the threshold, and per face (at most {{ p.max_faces }}) its box, the matched <b>name, person id and distance</b> and the nearest named people with their distances</td></tr>
+  <tr><td>Request log</td><td><b>{{ "on" if p.request_log else "off" }}</b>{% if p.request_log %}, kept <b>{{ p.request_days }} days</b>{% endif %}: per verify call the time, app, status, latency, image size and counts only; per identify call the time, app, status or error code, latency, image size in bytes and pixels, the number of faces matched, unknown, ambiguous and near the threshold, and per face (at most {{ p.max_faces }}) its box, the matched <b>name, person id and distance</b> and the nearest named people with their distances</td></tr>
+  {% if lim.changes %}<tr><td>People change log</td><td>ids and names of the archive's named people, which named person each face belongs to (ids only), and the change events, kept <b>{{ lim.changes_days }} days</b>. No images, no embeddings</td></tr>{% endif %}
   <tr><td>Face crops</td><td><b>{{ p.crops }}</b>{% if p.crops != "none" %}, kept <b>{{ p.crop_days }} days</b>: a {{ p.crop_size }} px JPEG of {{ "every detected face" if p.crops == "all" else "each unknown, ambiguous or near-threshold face" }} (a new image, no metadata) and its face embedding, so curators can name missed people. Crops and embeddings are <b>biometric data</b>{% endif %}</td></tr>
 </table>
 <ul>

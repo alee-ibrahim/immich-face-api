@@ -223,9 +223,10 @@ async def test_admin_docs(store_settings):
         assert 'data-lang="php"' in r.text and "X-API-Key" in r.text and 'src="/static/docs.js"' in r.text
         assert not re.search(r"<script(?![^>]*\bsrc=)", r.text)  # no inline script (strict CSP)
         assert "&lt;secret&gt;" in r.text  # code is escaped
+        assert 'id="verify"' in r.text and 'id="changes"' in r.text and "/v1/people/changes?since=" in r.text
         ref = await c.get("/docs/reference")
         assert ref.status_code == 200
-        for path in ("/v1/identify", "/v1/people", "/healthz"):
+        for path in ("/v1/identify", "/v1/verify", "/v1/verify/batch", "/v1/people", "/v1/people/changes", "/healthz"):
             assert path in ref.text
         assert "box.x" in ref.text and "candidates[].votes" in ref.text
         spec = await c.get("/docs/openapi.json")

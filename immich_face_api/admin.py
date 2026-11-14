@@ -29,6 +29,7 @@ from markupsafe import Markup, escape
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__
+from . import changes as ch
 from .apidocs import reference
 from .app import HttpError, State, extract_image, read_body
 from .charts import bar_chart, line_chart
@@ -338,9 +339,17 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
         for a in by_client:
             a["unknown"] = a["faces"] - a["matched"]
         top_unknown = sorted((a for a in by_client if a["unknown"]), key=lambda a: -a["unknown"])[:10]
+        recent, tracker = [], None
+        if template == "dashboard.html" and settings.changes_interval:
+            with contextlib.suppress(Exception):
+                recent = await ch.list_changes(st.store, limit=8, newest_first=True)
+                tracker = await ch.tracker_status(st.store)
         return render(
             request,
             template,
+            recent_changes=recent,
+            tracker=tracker,
+            person_url=person_url,
             range=range_ if range_ in ("24h", "7d", "30d", "90d") else "7d",
             client=client,
             clients=await st.store.clients(),
@@ -534,6 +543,30 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
             p=privacy(),
         )
 
+    @app.get("/changes")
+    async def changes_page(request: Request, u: User, type: str = "", person: str = "", before: str = ""):  # noqa: A002
+        st: State = app.state.face
+        types = (type,) if type in ch.TYPES else ch.TYPES
+        person = person.strip().lower()
+        pid = person if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", person) else None
+        rows = await ch.list_changes(
+            st.store, types=types, person_id=pid, before_id=int_or_none(before), limit=100, newest_first=True
+        )
+        return render(
+            request,
+            "changes.html",
+            rows=rows,
+            t=await ch.tracker_status(st.store),
+            enabled=settings.changes_interval > 0,
+            interval=settings.changes_interval,
+            full_hours=settings.changes_full_hours,
+            retention=settings.changes_retention_days,
+            types=ch.TYPES,
+            f={"type": type if len(types) == 1 else "", "person": pid or ""},
+            next_before=rows[-1]["id"] if len(rows) == 100 else None,
+            person_url=person_url,
+        )
+
     @app.get("/crops/{name}")
     async def crop(u: User, name: str):
         """A face crop: signed-in admins only, never cached, never on the API port."""
@@ -624,6 +657,11 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
             "immich": settings.expected_immich_version,
             "max_edge": settings.max_edge,
             "people": settings.enable_people,
+            "verify_claims": settings.verify_max_claims,
+            "verify_batch": settings.verify_batch_max,
+            "changes": settings.enable_people and bool(settings.store_url) and settings.changes_interval > 0,
+            "changes_minutes": max(1, settings.changes_interval // 60),
+            "changes_days": settings.changes_retention_days,
         }
 
     @app.get("/docs")
