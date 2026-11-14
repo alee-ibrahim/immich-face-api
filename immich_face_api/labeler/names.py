@@ -30,8 +30,76 @@ def clean_name(raw: str, rules: NameRules) -> str | None:
         return None
     if any(re.search(p, s, flags=re.I) for p in rules.exclude_patterns):
         return None
-    # "MP AHMED AMIR", "hassan shareef", "Mariyam hudha" -> capitalised words; "AbdulRahmaan" is kept as written
-    return " ".join(w[:1].upper() + w[1:].lower() if w.isupper() or w.islower() else w for w in s.split(" "))
+    # "MP AHMED AMIR", "hassan shareef", "Mariyam hudha" -> capitalised words; "AbdulRahmaan" is kept as written;
+    # titles (rules.titles / keep_titles) removed or written one way
+    out = tidy_name(
+        " ".join(w[:1].upper() + w[1:].lower() if w.isupper() or w.islower() else w for w in s.split(" ")), rules
+    )
+    return out if len(_LETTER.findall(out)) >= 3 else None
+
+
+_TITLE_PUNCT = re.compile(r"[.,:;]")
+
+
+def title_key(text: str) -> str:
+    """ "M.P." / "m p" / "Hon," -> "mp" / "mp" / "hon": the form titles are compared in."""
+    return " ".join(_TITLE_PUNCT.sub(" ", unicodedata.normalize("NFKC", text)).casefold().split()).replace(" ", "")
+
+
+def _capitalise(words: list[str]) -> list[str]:
+    # "AHMED" / "ahmed" -> "Ahmed"; mixed case ("AbdulRahmaan", "McDonald") and non-cased scripts are kept as written
+    return [w[:1].upper() + w[1:].lower() if (w.isupper() and len(w) > 1) or w.islower() else w for w in words]
+
+
+def tidy_name(name: str, rules: NameRules) -> str:
+    """Remove titles (``rules.titles``) from the start and the end of a name, write a kept title
+    (``rules.keep_titles``) one way and put it first, collapse whitespace and capitalise all-upper/all-lower words.
+    Only whole words at the edges are removed ("Hon. Ali Shah, MP" -> "Ali Shah"; "Dhonmanik" stays). A name that
+    would be left without letters is returned unchanged apart from whitespace."""
+    s = _SPACES.sub(" ", unicodedata.normalize("NFC", name or "")).strip()
+    if not s or not (rules.titles or rules.keep_titles):
+        return " ".join(_capitalise(s.split(" "))) if s else s
+    drop = {title_key(t): len(t.split()) for t in rules.titles if title_key(t)}
+    keep = {title_key(k): v for k, v in rules.keep_titles.items() if title_key(k)}
+    sizes = sorted({len(t.split()) for t in [*rules.titles, *rules.keep_titles]}, reverse=True)
+
+    def title_at(words: list[str], start: bool) -> tuple[int, str | None] | None:
+        for n in sizes:
+            if n > len(words):
+                continue
+            part = words[:n] if start else words[-n:]
+            joined = " ".join(part)
+            inner = joined[1:-1] if joined.startswith("(") and joined.endswith(")") else joined
+            key = title_key(inner)
+            if key in keep:
+                return n, keep[key]
+            if key in drop:
+                return n, None
+        return None
+
+    words = s.split(" ")
+    kept: str | None = None
+    changed = True
+    while changed and words:
+        changed = False
+        for start in (True, False):
+            hit = title_at(words, start)
+            if hit:
+                n, canonical = hit
+                words = words[n:] if start else words[:-n]
+                kept = kept or canonical
+                changed = True
+    rest = " ".join(words).strip(" ,;-")
+    if len(_LETTER.findall(rest)) < 2:
+        return " ".join(_capitalise(s.split(" ")))
+    out = _capitalise(rest.split(" "))
+    return " ".join(([kept] if kept else []) + out)
+
+
+def has_title(name: str, rules: NameRules) -> bool:
+    """True if a title word appears anywhere in the name (also mid-name), for reporting doubtful names."""
+    keys = {title_key(t) for t in [*rules.titles, *rules.keep_titles] if len(t.split()) == 1}
+    return any(title_key(w.strip("()")) in keys for w in (name or "").split())
 
 
 def _skeleton(token: str) -> str:

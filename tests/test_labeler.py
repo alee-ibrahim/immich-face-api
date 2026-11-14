@@ -315,7 +315,7 @@ def test_write_names_never_overwrites_and_respects_cap():
     people = {k: {"name": "", "isHidden": False} for k in "ABCDE"}
     people["D"]["isHidden"] = True
     ctx = SimpleNamespace(
-        s=SimpleNamespace(max_apply=1),
+        s=SimpleNamespace(max_apply=1, sources=SimpleNamespace(names=NameRules())),
         store=FakeStore(before={"E"}),
         api=FakeAPI(people),
         db=FakeDB({"B": "Curator Set"}),
@@ -365,7 +365,12 @@ def test_write_names_skips_held_and_vanished_people():
             return super().person(pid)
 
     people = {k: {"name": "", "isHidden": False} for k in "AH"}
-    ctx = SimpleNamespace(s=SimpleNamespace(max_apply=10), store=FakeStore(), api=API(people), db=FakeDB({}))
+    ctx = SimpleNamespace(
+        s=SimpleNamespace(max_apply=10, sources=SimpleNamespace(names=NameRules())),
+        store=FakeStore(),
+        api=API(people),
+        db=FakeDB({}),
+    )
     props = [
         {"person_id": "H", "name": "Name H", "evidence": ["x", "HOLD: the sources disagree on the name"]},
         {"person_id": "G", "name": "Name G", "evidence": []},
@@ -615,3 +620,146 @@ def test_overrides_only_for_pure_name_conflicts_and_only_names_from_the_evidence
     assert not any(e.startswith("HOLD") for e in out[0]["evidence"])
     assert out[0]["evidence"][-1] == "name decided by directory: unique match"
     assert c == Counter(usable=1, not_only_a_name_conflict=2, name_not_among_the_evidence=1)
+
+
+# --- titles ---------------------------------------------------------------------------------------------------------
+TITLES = NameRules(
+    titles=["Hon", "Honourable", "MP", "Mr", "Mrs", "His Excellency", "Al-Ustaz", "Deputy Speaker", "Speaker"],
+    keep_titles={"Dr": "Dr.", "Doctor": "Dr."},
+)
+
+
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [
+        ("Hon. Jane Example", "Jane Example"),
+        ("Jane Example, MP", "Jane Example"),
+        ("Jane Example (MP)", "Jane Example"),
+        ("Jane Example M.P.", "Jane Example"),
+        ("His Excellency Jane Example", "Jane Example"),
+        ("Deputy Speaker Hon. Jane Example", "Jane Example"),
+        ("Dr Jane Example", "Dr. Jane Example"),
+        ("Doctor Jane Example", "Dr. Jane Example"),
+        ("Hon. Dr. Jane Example", "Dr. Jane Example"),
+        ("Dr. Jane Example", "Dr. Jane Example"),
+        ("JANE  EXAMPLE ", "Jane Example"),
+        ("Honey Example", "Honey Example"),  # a name, not a title
+        ("Jane Dhonexample", "Jane Dhonexample"),
+        ("Mr", "Mr"),  # nothing left: unchanged
+        ("Jane Mr Example", "Jane Mr Example"),  # only the edges are touched
+    ],
+)
+def test_tidy_name(raw, want):
+    from immich_face_api.labeler.names import tidy_name
+
+    assert tidy_name(raw, TITLES) == want
+
+
+def test_tidy_name_without_rules_only_spacing_and_casing():
+    from immich_face_api.labeler.names import tidy_name
+
+    assert tidy_name("  hon.  jane   example ", NameRules()) == "Hon. Jane Example"
+
+
+def test_clean_name_strips_titles():
+    assert clean_name("Hon. Jane Example", TITLES) == "Jane Example"
+    assert clean_name("Dr Jane Example", TITLES) == "Dr. Jane Example"
+
+
+def test_write_names_never_writes_a_title():
+    people = {"A": {"name": "", "isHidden": False}}
+    ctx = SimpleNamespace(
+        s=SimpleNamespace(max_apply=5, sources=SimpleNamespace(names=TITLES)),
+        store=FakeStore(before=set()),
+        api=FakeAPI(people),
+        db=FakeDB({}),
+    )
+    cli._write_names(ctx, "r1", "r0", "owner", [{"person_id": "A", "name": "Hon. Jane Example"}])
+    assert ctx.api.writes == [("A", "Jane Example")]
+
+
+class RenameStore:
+    def __init__(self):
+        self.rows = []
+
+    def audit_rename(self, run, pid, owner, old, new, target, note):
+        self.rows.append(
+            {
+                "person_id": pid,
+                "owner_id": owner,
+                "old_name": old,
+                "new_name": new,
+                "target": target,
+                "status": "pending",
+                "id": len(self.rows),
+            }
+        )
+        return len(self.rows) - 1
+
+    def audit_set(self, i, status, note=None):
+        self.rows[i]["status"] = status
+
+    def audit_undone(self, i, run):
+        self.rows[i]["status"] = "undone"
+
+
+def test_tidy_owner_plan_apply_and_doubtful():
+    from immich_face_api.labeler.tidy import apply_owner, plan_owner, summary
+
+    rows = [
+        ("a", "Hon. Jane Example"),
+        ("b", "Dr. Sam Example"),
+        ("c", "Jane Mr Example"),
+        ("d", "Dr Ali Example"),
+        ("e", "Changed Later Hon."),
+    ]
+    changes, doubtful = plan_owner(rows, TITLES)
+    assert [(c["person_id"], c["new"]) for c in changes] == [
+        ("a", "Jane Example"),
+        ("d", "Dr. Ali Example"),
+        ("e", "Changed Later"),
+    ]
+    assert [d["person_id"] for d in doubtful] == ["c"]
+    assert summary(changes, doubtful)["by_title"] == {"Hon.": 2, "Dr": 1}
+    people = {"a": {"name": "Hon. Jane Example"}, "d": {"name": "Dr Ali Example"}, "e": {"name": "Renamed By Hand"}}
+    api, st = FakeAPI(people), RenameStore()
+    res = apply_owner(api, st, "r", "owner", changes, cap=10)
+    assert res == Counter(applied=2, skipped_changed=1)
+    assert people["a"]["name"] == "Jane Example" and people["e"]["name"] == "Renamed By Hand"
+    assert [r["old_name"] for r in st.rows] == ["Hon. Jane Example", "Dr Ali Example"]
+
+
+def test_tidy_copies_follow_owner_and_keep_own_spelling():
+    from immich_face_api.labeler.share_names import undo_copies
+    from immich_face_api.labeler.tidy import apply_copies, plan_copies
+
+    names = {("u1", "g1"): "Hon. Jane Example", ("u2", "g1"): "Hon. Jane Exampel", ("u1", "g2"): "Hon. Sam Example"}
+
+    class W(FakeWriter):
+        def rename(self, user, group, old, new):
+            return self.revert(user, group, old, new)
+
+    w = W([], names)
+    rows = [
+        ("g1", "u1", names[("u1", "g1")], "Jane Example"),
+        ("g1", "u2", names[("u2", "g1")], "Jane Example"),
+        ("g2", "u1", names[("u1", "g2")], "Hon. Sam Example"),
+    ]
+    changes, own = plan_copies(rows, TITLES)
+    assert [c["user_id"] + c["person_id"] for c in changes] == ["u1g1", "u1g2"]
+    assert [o["user_id"] for o in own] == ["u2"]  # the curator's own spelling stays
+    st = RenameStore()
+    res = apply_copies(w, st, "r", changes, cap=10)
+    assert res == Counter(applied=1, skipped_owner_not_tidy=1)  # g2: owner not tidied yet
+    assert names[("u1", "g1")] == "Jane Example" and names[("u2", "g1")] == "Hon. Jane Exampel"
+    applied = [r for r in st.rows if r["status"] == "applied"]
+    assert undo_copies(w, st, "u", applied) == Counter(undone=1)
+    assert names[("u1", "g1")] == "Hon. Jane Example"
+
+
+def test_tidy_names_parser():
+    p = cli.build_parser()
+    a = p.parse_args(["tidy-names"])
+    assert not a.apply and not a.copies
+    a = p.parse_args(["tidy-names", "--copies", "--apply"])
+    assert a.apply and a.copies

@@ -254,6 +254,17 @@ class Store:
         ).fetchone()
         return row[0]
 
+    def audit_rename(
+        self, run_id: str, person_id: str, owner_id: str, old: str, new: str, target: str, note: str
+    ) -> int:
+        """A rename of an existing name (tidy-names), pending until written."""
+        row = self.conn.execute(
+            """INSERT INTO labeler_audit (run_id, person_id, owner_id, old_name, new_name, status, target, note)
+               VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s) RETURNING id""",
+            (run_id, person_id, owner_id, old, new, target, note),
+        ).fetchone()
+        return row[0]
+
     def applied(self, run_id: str | None, person_ids: list[str] | None, target: str = "owner") -> list[dict]:
         q = (
             "SELECT id, run_id, person_id::text, owner_id::text, old_name, new_name FROM labeler_audit "

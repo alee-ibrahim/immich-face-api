@@ -14,6 +14,7 @@ Configuration comes from LABELER_* environment variables and the JSON file in LA
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import time
@@ -25,11 +26,12 @@ import numpy as np
 from .folders import folder_references, overlap
 from .immich import ImmichAPI, ImmichDB, ImmichError
 from .match import build_identities, held, merge_candidates, named_vote, propose
-from .names import compatible
+from .names import compatible, tidy_name
 from .report import proposals_csv, proposals_html, worklist_csv, worklist_html
 from .settings import ConfigError, LabelerSettings
 from .share_names import NameWriter, share_names, undo_copies
 from .store import Store, new_run_id
+from .tidy import apply_copies, apply_owner, plan_copies, plan_owner, summary
 from .web import Embedder, Fetcher, web_references
 
 log = logging.getLogger("labeler")
@@ -63,6 +65,8 @@ def _write_names(ctx: Context, run_id: str, source_run: str | None, owner: str, 
     """The only place that writes to Immich. Every candidate is re-checked right before its write."""
     c: Counter = Counter()
     for p in props:
+        # never write a title (config names.titles); kept titles one way (names.keep_titles)
+        p = {**p, "name": tidy_name(p["name"], ctx.s.sources.names)}
         if c["applied"] >= ctx.s.max_apply:
             c["over_cap"] += 1
             continue
@@ -426,6 +430,42 @@ def cmd_share_names(s: LabelerSettings, args) -> int:
         ctx.close()
 
 
+def cmd_tidy_names(s: LabelerSettings, args) -> int:
+    """Remove titles from existing names (tidy.py). Owner names via the API; --copies via the name-copy role."""
+    rules = s.sources.names
+    if not (rules.titles or rules.keep_titles):
+        raise ConfigError("tidy-names: no names.titles / names.keep_titles in the config")
+    ctx = Context(s, need_db=not args.copies)
+    writer = NameWriter(s) if args.copies else None
+    run_id = new_run_id()
+    ctx.store.start_run(run_id, "tidy-names")
+    try:
+        owner = ctx.owner()
+        if writer is not None:
+            writer.check()
+            changes, own_spelling = plan_copies(writer.copies_with_owner(owner), rules)
+            stats = {"target": "copies", **summary(changes, []), "own_spelling": own_spelling}
+            if args.apply:
+                stats.update(apply_copies(writer, ctx.store, run_id, changes, s.max_copies))
+        else:
+            ctx.db.check(need_paths=False)
+            changes, doubtful = plan_owner(ctx.db.named_people(owner), rules)
+            stats = {"target": "owner", **summary(changes, doubtful)}
+            if args.apply:
+                stats.update(apply_owner(ctx.api, ctx.store, run_id, owner, changes, s.max_apply))
+        stats["mode"] = "write" if args.apply else "dry run"
+        ctx.store.finish_run(run_id, "ok", stats)
+        log.info("tidy-names %s: %s", run_id, json.dumps(stats, ensure_ascii=False))
+        return 0
+    except Exception as exc:
+        ctx.store.finish_run(run_id, "failed", {"error": f"{type(exc).__name__}: {exc}"})
+        raise
+    finally:
+        if writer is not None:
+            writer.close()
+        ctx.close()
+
+
 def cmd_undo(s: LabelerSettings, args) -> int:
     if not args.run and not args.person:
         raise ConfigError("undo needs --run or --person")
@@ -526,6 +566,11 @@ def build_parser() -> argparse.ArgumentParser:
     wl.add_argument("--top", type=int, default=200)
     sn = sub.add_parser("share-names", help="copy owner names into empty shared copies")
     sn.add_argument("--dry-run", action="store_true", help="count only, write nothing")
+    tn = sub.add_parser(
+        "tidy-names", help="remove titles (config names.titles) from existing names; dry run by default"
+    )
+    tn.add_argument("--apply", action="store_true", help="write (audited; undo with undo --run / undo --copies --run)")
+    tn.add_argument("--copies", action="store_true", help="curators' copies (name-copy role) instead of owner names")
     e = sub.add_parser("export", help="write a stored report to a directory")
     e.add_argument("--run", default="latest")
     e.add_argument("--out", required=True)
@@ -547,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
             "worklist": cmd_worklist,
             "apply-overrides": cmd_apply_overrides,
             "undo": cmd_undo,
+            "tidy-names": cmd_tidy_names,
             "export": cmd_export,
             "status": cmd_status,
         }

@@ -153,6 +153,12 @@ class NameRules:
     exclude: list[str] = field(default_factory=list)  # cleaned names that are not people (case-insensitive)
     exclude_patterns: list[str] = field(default_factory=list)
     homonym_detail: str = ""  # web card detail (named group) appended to tell same-name people apart: "Name (detail)"
+    # honorifics and titles removed from the start or end of every name (folder, web card, Wikidata, and every name
+    # the labeler writes), e.g. ["Hon", "MP", "Mr", "His Excellency"]; matched case-insensitively, ignoring dots and
+    # commas ("M.P." = "MP"), also in parentheses ("(MP)"). Several words = one title. Empty = none.
+    titles: list[str] = field(default_factory=list)
+    # titles that stay, written one way: {"Dr": "Dr.", "Doctor": "Dr."} (keys matched like ``titles``)
+    keep_titles: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

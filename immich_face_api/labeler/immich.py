@@ -171,6 +171,15 @@ class ImmichDB:
                     rows.setdefault(g, []).append(parse_vector(emb))
         return {g: normalise(np.stack(v)) for g, v in rows.items()}
 
+    def named_people(self, owner: str) -> list[tuple[str, str]]:
+        """(person id, name) of every named person of the owner (tidy-names)."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                'SELECT "personGroupId"::text, name FROM person WHERE "ownerId" = %s AND name <> \'\' ORDER BY 1',
+                (owner,),
+            )
+            return list(cur.fetchall())
+
     def group_names(self, person_id: str) -> list[tuple[str, str]]:
         with self.conn.cursor() as cur:
             cur.execute('SELECT "ownerId"::text, name FROM person WHERE "personGroupId" = %s', (person_id,))

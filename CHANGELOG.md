@@ -5,6 +5,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added (labeler: titles)
+- `names.titles` / `names.keep_titles` in the labeler config: honorifics and titles are removed from the start and end
+  of every name (folders, web cards, Wikidata, and at the single write point), kept titles are written one way
+  (e.g. `Dr` / `Doctor` -> `Dr.`), whitespace and casing are normalised. Whole words at the edges only.
+- `tidy-names` command (dry run unless `--apply`): removes titles from names already in Immich, owner names through
+  the API, curators' copies (`--copies`) through the name-copy role only where the copy follows the owner's name;
+  doubtful names (a title word inside) and curators' own spellings are listed, never changed. Audited; `undo --run` /
+  `undo --copies --run` revert.
+
 ### Fixed (same-name candidates)
 - A face whose two best candidates are **one person split over two Immich people with the same name** is no longer
   `ambiguous`. Same normalised name and centroids within `FACE_API_SAME_NAME_MAX_DISTANCE` (0.6) = same person;
