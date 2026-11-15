@@ -34,16 +34,17 @@
       img.src = url;
       stage.classList.remove("hidden");
       const known = data.faces.filter((f) => f.name).length;
-      text(msg, `${data.faces.length} face(s), ${known} named. Image ${data.image.w}×${data.image.h}.`);
+      const kind = data.photo_type ? ` Photo type: ${data.photo_type.replace("_", " ")}.` : "";
+      text(msg, `${data.faces.length} face(s), ${known} named. Image ${data.image.w}×${data.image.h}.${kind}`);
       data.faces.forEach((f, i) => {
         const box = document.createElement("div");
-        box.className = "face" + (f.name ? " known" : "");
+        box.className = "face" + (f.role ? " role-" + f.role : f.name ? " known" : "");
         box.style.left = (f.box.x * 100) + "%";
         box.style.top = (f.box.y * 100) + "%";
         box.style.width = (f.box.w * 100) + "%";
         box.style.height = (f.box.h * 100) + "%";
         const label = document.createElement("span");
-        text(label, `${i + 1}. ${f.name || "unknown"}`);
+        text(label, `${i + 1}. ${f.name || "unknown"}` + (f.role ? ` · ${f.role.replace("_", "-")}` : ""));
         box.appendChild(label);
         stage.appendChild(box);
         const tr = document.createElement("tr");
@@ -52,9 +53,10 @@
           f.name || "unknown",
           f.distance == null ? "—" : f.distance.toFixed(3),
           f.ambiguous ? "yes" : "",
+          f.role ? `${f.role.replace("_", "-")} (${f.prominence.toFixed(2)})` : "—",
           (f.candidates || []).map((c) => `${c.name || "?"} (${c.distance.toFixed(3)})`).join(", "),
         ];
-        const heads = ["#", "Name", "Distance", "Ambiguous", "Candidates"];
+        const heads = ["#", "Name", "Distance", "Ambiguous", "Subject", "Candidates"];
         cells.forEach((v, j) => { const td = document.createElement("td"); td.dataset.label = heads[j]; text(td, v); tr.appendChild(td); });
         out.appendChild(tr);
       });

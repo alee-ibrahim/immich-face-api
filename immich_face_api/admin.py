@@ -2,10 +2,13 @@
 
 Server-rendered (Jinja2), no JavaScript build and nothing from a CDN. Pages: dashboard (usage over time), apps and
 API keys (create - the key is shown once - and revoke), usage per app, the request log ("Requests") and "Missed faces"
-(unknown, ambiguous and near-threshold faces with their crops, if crops are stored), and "Try it" (upload a photo, see
-boxes and names; nothing is stored or counted). Face crops are served only by these signed-in routes, never cached. Sign-in: any OpenID Connect provider (FACE_API_OIDC_*), optionally limited to a
-claim value (FACE_API_OIDC_ADMIN_CLAIM / _VALUES); without OIDC, a bootstrap admin token (local use). Every form and
-the try-it call carry a per-session CSRF token. Run it on its own port and never route it publicly.
+(unknown, ambiguous and near-threshold faces with their crops, if crops are stored), "Try it" (upload a photo, see
+boxes, names and subject roles; nothing is stored or counted) and "Label subjects" (curators mark the main subject of
+sample photos for calibration; only labels and measured signals are stored). Face crops and Immich previews are served
+only by these signed-in routes, never cached. Sign-in: any OpenID Connect provider (FACE_API_OIDC_*), optionally
+limited by a role claim (FACE_API_OIDC_ADMIN_CLAIM): FACE_API_OIDC_ADMIN_VALUES give the admin role,
+FACE_API_OIDC_CURATOR_VALUES the curator role (only "Label subjects"); without OIDC, a bootstrap admin token (local
+use). Every form and the try-it call carry a per-session CSRF token. Run it on its own port and never route it publicly.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import hmac
 import logging
 import re
 import secrets
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from importlib.resources import files
@@ -30,10 +34,13 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__
 from . import changes as ch
+from . import labels as lb
 from .apidocs import reference
 from .app import HttpError, State, extract_image, read_body
 from .charts import bar_chart, line_chart
 from .config import ConfigError, Settings
+from .immich_api import ImmichAssets, ImmichError
+from .matching import normalise_box
 from .openapi import OPENAPI_SPEC
 from .requestlog import embedding_text
 from .store import series, since_for, totals
@@ -46,6 +53,7 @@ STATIC = {
     "try.js": "text/javascript",
     "confirm.js": "text/javascript",
     "docs.js": "text/javascript",
+    "subjects.js": "text/javascript",
 }
 APP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
@@ -54,14 +62,45 @@ class NotSignedIn(Exception):
     pass
 
 
+class NotAllowed(Exception):
+    """Signed in, but as a curator on an admin page."""
+
+
 def signed_in_user(request: Request) -> dict:
+    """An admin (every page)."""
+    u = request.session.get("user")
+    if not u:
+        raise NotSignedIn()
+    if u.get("role", "admin") != "admin":
+        raise NotAllowed()
+    return u
+
+
+def signed_in_curator(request: Request) -> dict:
+    """An admin or a curator ("Label subjects" only)."""
     u = request.session.get("user")
     if not u:
         raise NotSignedIn()
     return u
 
 
+def role_from_claims(settings: Settings, claims: dict) -> str | None:
+    """'admin', 'curator' or None (no access), from the role claim (FACE_API_OIDC_ADMIN_CLAIM, e.g. Entra app roles
+    in "roles"); without a claim configured everyone the identity provider lets in is an admin (e.g. Entra
+    "assignment required")."""
+    if not settings.oidc_admin_claim:
+        return "admin"
+    value = claims.get(settings.oidc_admin_claim)
+    values = set(value) if isinstance(value, list) else {value} if value else set()
+    if values & set(settings.oidc_admin_values):
+        return "admin"
+    if values & set(settings.oidc_curator_values):
+        return "curator"
+    return None
+
+
 User = Annotated[dict, Depends(signed_in_user)]
+Curator = Annotated[dict, Depends(signed_in_curator)]
 
 
 def ago(ts) -> str:
@@ -183,7 +222,17 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
         await state.store.open(migrate=True)
         task = asyncio.create_task(state.readiness_loop())
         cache_task = asyncio.create_task(state.faces.loop()) if state.faces is not None else None
-        log.info("admin started", extra={"fields": {"version": __version__, "oidc": settings.oidc_enabled}})
+        log.info(
+            "admin started",
+            extra={
+                "fields": {
+                    "version": __version__,
+                    "oidc": settings.oidc_enabled,
+                    "subject_model": state.subject_model.version,
+                    "label_from_immich": assets is not None,
+                }
+            },
+        )
         try:
             yield
         finally:
@@ -195,7 +244,14 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
             await state.ml.close()
             await state.db.close()
             await state.store.close()
+            if assets is not None:
+                await assets.close()
 
+    assets = (
+        ImmichAssets(settings.immich_api_url, settings.immich_api_key)
+        if settings.immich_api_url and settings.immich_api_key
+        else None
+    )
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.face = State(settings)
     if app.state.face.faces is not None:
@@ -225,6 +281,10 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
     @app.exception_handler(NotSignedIn)
     async def not_signed_in(request: Request, _exc: NotSignedIn):
         return RedirectResponse("/login", 303)
+
+    @app.exception_handler(NotAllowed)
+    async def not_allowed(request: Request, _exc: NotAllowed):
+        return RedirectResponse("/subjects", 303)
 
     # ------------------------------------------------------------------ helpers
 
@@ -257,12 +317,8 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
     def callback_url(request: Request) -> str:
         return f"{settings.public_url}/auth/callback" if settings.public_url else str(request.url_for("callback"))
 
-    def is_admin(claims: dict) -> bool:
-        if not settings.oidc_admin_claim:
-            return True  # who may sign in is decided by the identity provider (e.g. assignment required)
-        value = claims.get(settings.oidc_admin_claim)
-        values = set(value) if isinstance(value, list) else {value} if value else set()
-        return bool(values & set(settings.oidc_admin_values))
+    def role_of(claims: dict) -> str | None:
+        return role_from_claims(settings, claims)
 
     # ------------------------------------------------------------------ static, health
 
@@ -300,7 +356,7 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
             return render(request, "login.html", 403, error="The form expired; try again.")
         if oauth or not settings.admin_token or not hmac.compare_digest(token, settings.admin_token):
             return render(request, "login.html", 401, error="That is not the admin token.")
-        request.session["user"] = {"name": "Admin (token)", "id": "admin-token"}
+        request.session["user"] = {"name": "Admin (token)", "id": "admin-token", "role": "admin"}
         return RedirectResponse("/", 303)
 
     @app.get("/auth/callback", name="callback")
@@ -314,13 +370,14 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
             return render(request, "login.html", 400, error="Sign-in failed. Try again.")
         claims = token.get("userinfo") or {}
         who = claims.get("email") or claims.get("preferred_username") or claims.get("sub") or "unknown"
-        if not is_admin(claims):
+        role = role_of(claims)
+        if role is None:
             log.warning("admin sign-in refused", extra={"fields": {"user": who}})
-            return render(request, "login.html", 403, error=f"{who} is not an admin of this service.")
+            return render(request, "login.html", 403, error=f"{who} is not an admin or curator of this service.")
         request.session.clear()
-        request.session["user"] = {"name": claims.get("name") or who, "id": who}
-        log.info("admin signed in", extra={"fields": {"user": who}})
-        return RedirectResponse("/", 303)
+        request.session["user"] = {"name": claims.get("name") or who, "id": who, "role": role}
+        log.info("admin signed in", extra={"fields": {"user": who, "role": role}})
+        return RedirectResponse("/" if role == "admin" else "/subjects", 303)
 
     @app.post("/logout")
     async def logout(request: Request, csrf: Annotated[str, Form()]):
@@ -665,6 +722,9 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
             "changes": settings.enable_people and bool(settings.store_url) and settings.changes_interval > 0,
             "changes_minutes": max(1, settings.changes_interval // 60),
             "changes_days": settings.changes_retention_days,
+            "subject": settings.subject_scoring,
+            "subject_version": app.state.face.subject_model.version,
+            "landmarks": settings.subject_landmarks,
         }
 
     @app.get("/docs")
@@ -697,11 +757,205 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
             body = await read_body(request, settings.max_upload_bytes)
             raw = extract_image(request.headers.get("content-type", ""), body)
             del body
-            result = await st.identify(raw, candidates=3, rid="admin-try")
+            result = await st.identify(raw, candidates=3, rid="admin-try", subject=settings.subject_scoring != "off")
             result.pop("_stats", None)
             return JSONResponse(result)
         except HttpError as exc:
             return JSONResponse({"error": {"code": exc.code, "message": exc.message}}, status_code=exc.status)
+
+    # ------------------------------------------------------------------ label subjects (calibration)
+
+    def sample_id(value: str) -> int | None:
+        return int(value) if value.isdigit() and len(value) < 19 else None
+
+    def can_see(u: dict, sample: dict) -> bool:
+        return u.get("role", "admin") == "admin" or sample["created_by"] == u["id"]
+
+    async def analyse_photo(raw: bytes, rid: str) -> tuple[dict, list[dict]]:
+        """Detect + score one photo the way the API does; (image info, faces sorted left to right)."""
+        st: State = app.state.face
+        img, faces = await st._detect(raw, rid, landmarks=settings.subject_landmarks)
+        faces = sorted(faces, key=lambda f: (f.box["x1"], f.box["y1"]))
+        ps = await st.subjects(img, faces)
+        out = [
+            {
+                "box": normalise_box(f.box, img.sent_width, img.sent_height),
+                "prominence": fs.prominence,
+                "role": fs.role,
+                "signals": fs.signals,
+            }
+            for f, fs in zip(faces, ps.faces, strict=True)
+        ]
+        return {"w": img.sent_width, "h": img.sent_height, "photo_type": ps.photo_type}, out
+
+    def model_info() -> dict:
+        m = app.state.face.subject_model
+        return {
+            "version": m.version,
+            "description": m.description,
+            "scoring": settings.subject_scoring,
+            "landmarks": settings.subject_landmarks,
+            "file": bool(settings.subject_model_file or settings.subject_model_json),
+        }
+
+    @app.get("/subjects")
+    async def subjects_page(request: Request, u: Curator, msg: str = ""):
+        st: State = app.state.face
+        admin = u.get("role", "admin") == "admin"
+        return render(
+            request,
+            "subjects.html",
+            stats=await lb.stats(st.store),
+            recent=await lb.recent(st.store, None if admin else u["id"]),
+            model=model_info(),
+            immich=assets is not None,
+            admin=admin,
+            msg=msg,
+            max_mb=settings.max_upload_bytes // (1024 * 1024),
+        )
+
+    @app.get("/subjects/next")
+    async def subjects_next(request: Request, u: Curator, named: str = ""):
+        """A new sample photo from Immich: a random photo with faces that nobody has labelled yet."""
+        st: State = app.state.face
+        if assets is None:
+            return RedirectResponse("/subjects?msg=no-immich", 303)
+        if not st.ready:
+            return RedirectResponse("/subjects?msg=not-ready", 303)
+        rng = secrets.SystemRandom()
+        try:
+            for _ in range(4):
+                cands = await st.db.sample_assets(60, named=named == "1")
+                seen = await lb.labelled_assets(st.store, [a for a, _ in cands])
+                pool = [(a, n) for a, n in cands if a not in seen]
+                while pool:
+                    pick = rng.choices(pool, weights=[1.0 / max(1, n) for _, n in pool])[0]
+                    pool.remove(pick)
+                    got = await assets.preview(pick[0])
+                    if got is None:
+                        continue
+                    info, faces = await analyse_photo(got[0], "admin-label")
+                    del got
+                    if not faces:
+                        continue
+                    sid = await lb.create_sample(
+                        st.store,
+                        source="immich",
+                        asset_id=pick[0],
+                        created_by=u["id"],
+                        image_w=info["w"],
+                        image_h=info["h"],
+                        model_version=st.subject_model.version,
+                        photo_type=info["photo_type"],
+                        faces=faces,
+                    )
+                    return RedirectResponse(f"/subjects/{sid}?named={1 if named == '1' else 0}", 303)
+        except (ImmichError, HttpError) as exc:
+            log.warning("label sample failed", extra={"fields": {"error": str(exc)}})
+            return RedirectResponse("/subjects?msg=immich-error", 303)
+        return RedirectResponse("/subjects?msg=no-sample", 303)
+
+    @app.post("/subjects/upload")
+    async def subjects_upload(request: Request, u: Curator):
+        """A photo from the curator's computer: analysed in memory, only the boxes and signals are stored."""
+        try:
+            check_csrf(request, request.headers.get("x-csrf-token"))
+            st: State = app.state.face
+            if not st.ready:
+                raise HttpError(503, "not_ready", "the service is not ready: " + st.reason)
+            body = await read_body(request, settings.max_upload_bytes)
+            raw = extract_image(request.headers.get("content-type", ""), body)
+            del body
+            info, faces = await analyse_photo(raw, "admin-label")
+            del raw
+            if not faces:
+                return JSONResponse({"id": None, "faces": []})
+            sid = await lb.create_sample(
+                st.store,
+                source="upload",
+                asset_id=None,
+                created_by=u["id"],
+                image_w=info["w"],
+                image_h=info["h"],
+                model_version=st.subject_model.version,
+                photo_type=info["photo_type"],
+                faces=faces,
+            )
+            return JSONResponse({"id": sid, "faces": [{"box": f["box"]} for f in faces]})
+        except HttpError as exc:
+            return JSONResponse({"error": {"code": exc.code, "message": exc.message}}, status_code=exc.status)
+
+    @app.get("/subjects/{sid}")
+    async def subject_sample(request: Request, u: Curator, sid: str, named: str = ""):
+        n = sample_id(sid)
+        sample = await lb.get_sample(app.state.face.store, n) if n else None
+        if not sample or not can_see(u, sample):
+            return render(request, "subject_label.html", 404, sample=None)
+        fresh = time.time() - sample["created_at"].timestamp() < lb.PENDING_HOURS * 3600
+        return render(
+            request,
+            "subject_label.html",
+            sample=sample,
+            labels=sample["labels"] or ["background"] * len(sample["faces"]),
+            show_image=sample["source"] == "immich" and fresh and assets is not None,
+            named=named == "1",
+            admin=u.get("role", "admin") == "admin",
+        )
+
+    @app.get("/subjects/{sid}/image")
+    async def subject_image(u: Curator, sid: str):
+        """The Immich preview of a sample being labelled: signed-in, the sample's own curator (or an admin), within
+        a day of drawing it; fetched from Immich on each request and never cached."""
+        n = sample_id(sid)
+        sample = await lb.get_sample(app.state.face.store, n) if n else None
+        nothing = Response(status_code=404, headers={"Cache-Control": "no-store"})
+        if not sample or not can_see(u, sample) or sample["source"] != "immich" or assets is None:
+            return nothing
+        if time.time() - sample["created_at"].timestamp() > lb.PENDING_HOURS * 3600:
+            return nothing
+        try:
+            got = await assets.preview(sample["asset_id"])
+        except ImmichError:
+            return Response(status_code=502, headers={"Cache-Control": "no-store"})
+        if got is None:
+            return nothing
+        data, ctype = got
+        if ctype not in ("image/jpeg", "image/webp", "image/png"):
+            return nothing
+        return Response(
+            data,
+            media_type=ctype,
+            headers={
+                "Cache-Control": "no-store, private, max-age=0",
+                "Pragma": "no-cache",
+                "Content-Disposition": "inline",
+                "Cross-Origin-Resource-Policy": "same-origin",
+            },
+        )
+
+    @app.post("/subjects/{sid}")
+    async def subject_save(request: Request, u: Curator, sid: str):
+        form = await request.form()
+        try:
+            check_csrf(request, str(form.get("csrf") or ""))
+        except HttpError:
+            return RedirectResponse("/subjects?msg=expired", 303)
+        n = sample_id(sid)
+        st: State = app.state.face
+        sample = await lb.get_sample(st.store, n) if n else None
+        if not sample or not can_see(u, sample):
+            return RedirectResponse("/subjects?msg=missing", 303)
+        action = str(form.get("action") or "save")
+        if action == "skip":
+            await lb.save_labels(st.store, n, None, u["id"], skipped=True)
+        else:
+            labels = [str(form.get(f"role_{i}") or "background") for i in range(len(sample["faces"]))]
+            if any(x not in ("main", "co_subject", "background") for x in labels) or labels.count("main") > 1:
+                return RedirectResponse(f"/subjects/{n}?msg=invalid", 303)
+            await lb.save_labels(st.store, n, labels, u["id"])
+        if action in ("skip", "next") and sample["source"] == "immich":
+            return RedirectResponse(f"/subjects/next?named={1 if form.get('named') == '1' else 0}", 303)
+        return RedirectResponse("/subjects?msg=saved", 303)
 
     return app
 

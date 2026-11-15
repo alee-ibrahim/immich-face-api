@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Label subjects{% endblock %}
+{% block body %}
+{% if not sample %}
+<h1>Label subjects</h1>
+<p class="muted">That photo is not available. <a href="/subjects">Back</a></p>
+{% else %}
+<h1>Who is this photo about?</h1>
+<p class="muted">Photo #{{ sample.id }} · {{ sample.faces | length }} face(s){% if sample.labeled_at %} · labelled {{ sample.labeled_at | ago }} by {{ sample.labeled_by }}{% if sample.skipped %} (not sure){% endif %}{% endif %}.
+Click a box to cycle <span class="key-bg">background</span> → <span class="key-main">main</span> → <span class="key-co">co-subject</span>. Everything not marked stays background.</p>
+<form method="post" action="/subjects/{{ sample.id }}" class="label-form">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="named" value="{{ '1' if named else '0' }}">
+  <div class="stage labeling">
+    {% if show_image %}<img src="/subjects/{{ sample.id }}/image" alt="The photo with the detected faces outlined" width="{{ sample.image_w }}" height="{{ sample.image_h }}">
+    {% else %}<div class="placeholder" data-w="{{ sample.image_w }}" data-h="{{ sample.image_h }}">The photo is not shown again ({{ "uploaded photos are never kept" if sample.source == "upload" else "a day has passed" }}); the boxes are where the faces were.</div>{% endif %}
+    {% for f in sample.faces %}
+    <div class="face role-{{ labels[loop.index0] }}" data-i="{{ loop.index0 }}" data-x="{{ f.box.x }}" data-y="{{ f.box.y }}" data-w="{{ f.box.w }}" data-h="{{ f.box.h }}"><span>{{ loop.index }}</span></div>
+    {% endfor %}
+  </div>
+  <div class="face-roles">
+    {% for f in sample.faces %}{% set i = loop.index0 %}
+    <fieldset class="face-role" data-i="{{ i }}"><legend>Face {{ loop.index }}{% if admin and sample.labeled_at %} <span class="muted">(model: {{ f.role | replace("_", "-") }}, {{ "%.2f" | format(f.prominence) }})</span>{% endif %}</legend>
+      {% for value, text in (("main", "Main"), ("co_subject", "Co-subject"), ("background", "Background")) %}
+      <label><input type="radio" name="role_{{ i }}" value="{{ value }}" {{ 'checked' if labels[i] == value }}> {{ text }}</label>
+      {% endfor %}
+    </fieldset>
+    {% endfor %}
+  </div>
+  <div class="row">
+    {% if sample.source == "immich" %}<button name="action" value="next">Save and next</button>{% endif %}
+    <button name="action" value="save" class="{{ 'ghost' if sample.source == 'immich' }}">Save</button>
+    <button class="ghost" name="action" value="skip">Not sure{% if sample.source == "immich" %}, next{% endif %}</button>
+    <a href="/subjects" class="muted">Back</a>
+  </div>
+</form>
+<script src="/static/subjects.js"></script>
+{% endif %}
+{% endblock %}

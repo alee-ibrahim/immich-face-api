@@ -53,6 +53,21 @@
               ]
             },
             "description": "Test mode only (FACE_API_TEST_MODE=true): also match unnamed person clusters. 400 otherwise."
+          },
+          {
+            "name": "subject",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1",
+                "true",
+                "false"
+              ]
+            },
+            "description": "Score main subjects (prominence, role, photo_type, main_face_index) for this request: default per FACE_API_SUBJECT_SCORING (always: on, request: off). 400 when scoring is off on the server."
           }
         ],
         "requestBody": {
@@ -208,6 +223,19 @@
               "type": "string"
             },
             "description": "Optional: only the face at this box (from an earlier identify), as `x,y,w,h` or JSON"
+          },
+          {
+            "name": "subject",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ]
+            },
+            "description": "as the form field subject (for a raw image body)"
           }
         ],
         "requestBody": {
@@ -235,6 +263,14 @@
                   "box": {
                     "type": "string",
                     "description": "x,y,w,h or JSON, from an earlier identify"
+                  },
+                  "subject": {
+                    "type": "string",
+                    "enum": [
+                      "0",
+                      "1"
+                    ],
+                    "description": "1 = also say per claim whether the person is the photo's main subject (is_main_subject)"
                   }
                 }
               }
@@ -392,6 +428,10 @@
                         },
                         "box": {
                           "$ref": "#/components/schemas/Box"
+                        },
+                        "subject": {
+                          "type": "boolean",
+                          "description": "also score main subjects for this photo"
                         }
                       }
                     }
@@ -858,6 +898,23 @@
               "$ref": "#/components/schemas/Candidate"
             },
             "description": "only with ?candidates=N"
+          },
+          "prominence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "how much the photo is about this face (main-subject scoring; absent when off)"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "main",
+              "co_subject",
+              "background"
+            ]
+          },
+          "subject_signals": {
+            "$ref": "#/components/schemas/SubjectSignals"
           }
         }
       },
@@ -902,6 +959,26 @@
           },
           "test_mode": {
             "type": "boolean"
+          },
+          "photo_type": {
+            "type": "string",
+            "enum": [
+              "none",
+              "portrait",
+              "small_group",
+              "crowd"
+            ],
+            "description": "main-subject scoring; absent when off"
+          },
+          "main_face_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "index into faces of the main face; null = no single main subject"
+          },
+          "subject_model_version": {
+            "type": "string"
           }
         }
       },
@@ -1272,6 +1349,30 @@
               "string",
               "null"
             ]
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "main",
+              "co_subject",
+              "background",
+              null
+            ],
+            "description": "only with subject=1: the role of the compared face"
+          },
+          "prominence": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "only with subject=1"
+          },
+          "is_main_subject": {
+            "type": "boolean",
+            "description": "only with subject=1: a match on the photo's main face"
           }
         }
       },
@@ -1305,6 +1406,23 @@
           },
           "ambiguous": {
             "type": "boolean"
+          },
+          "prominence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "how much the photo is about this face (main-subject scoring; absent when off)"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "main",
+              "co_subject",
+              "background"
+            ]
+          },
+          "subject_signals": {
+            "$ref": "#/components/schemas/SubjectSignals"
           }
         }
       },
@@ -1347,6 +1465,125 @@
           },
           "immich_version": {
             "type": "string"
+          },
+          "photo_type": {
+            "type": "string",
+            "enum": [
+              "none",
+              "portrait",
+              "small_group",
+              "crowd"
+            ],
+            "description": "main-subject scoring; absent when off"
+          },
+          "main_face_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "index into faces of the main face; null = no single main subject"
+          },
+          "subject_model_version": {
+            "type": "string"
+          }
+        }
+      },
+      "SubjectSignals": {
+        "type": "object",
+        "description": "Raw measurements behind prominence (README \"Main subject\").",
+        "properties": {
+          "area": {
+            "type": "number",
+            "description": "face box area / image area"
+          },
+          "size": {
+            "type": "number",
+            "description": "square root of area"
+          },
+          "face_px": {
+            "type": "integer",
+            "description": "short side of the face in pixels of the analysed image"
+          },
+          "dominance": {
+            "type": "number",
+            "description": "area / the largest face's area"
+          },
+          "lead": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "area / the largest other face's area; null for a lone face"
+          },
+          "sharpness": {
+            "type": "number",
+            "description": "focus of the face, 0..1 (re-blur measure at 48 px)"
+          },
+          "sharpness_rel": {
+            "type": "number",
+            "description": "sharpness / the photo's sharpest face"
+          },
+          "focus_bg": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "log2(face sharpness / background sharpness); > 0 = sharper than the background"
+          },
+          "centrality": {
+            "type": "number"
+          },
+          "thirds": {
+            "type": "number"
+          },
+          "edge_cut": {
+            "type": "number",
+            "description": "share of the detector's box outside the frame"
+          },
+          "touches_edge": {
+            "type": "boolean"
+          },
+          "yaw": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "degrees; only with FACE_API_SUBJECT_LANDMARKS"
+          },
+          "pitch": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "frontal": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "1 = facing the camera, 0 = profile"
+          },
+          "pose_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "landmarks",
+              null
+            ]
+          },
+          "detection_score": {
+            "type": "number"
+          },
+          "luminance": {
+            "type": "number"
+          },
+          "clipped": {
+            "type": "number"
+          },
+          "exposure": {
+            "type": "number"
           }
         }
       }

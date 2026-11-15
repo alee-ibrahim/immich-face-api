@@ -41,6 +41,7 @@ EXPECTED_COLUMNS: dict[tuple[str, str], str] = {
     ("asset_face", "assetVisibility"): "asset_visibility_enum",
     ("asset_face", "updatedAt"): "timestamp with time zone",
     ("asset_face", "updateId"): "uuid",  # people change log: faces changed since a check
+    ("asset_face", "assetId"): "uuid",  # admin "Label subjects": sample photos with faces
     ("face_search", "faceId"): "uuid",
     ("face_search", "embedding"): "vector(512)",
     ("version_history", "version"): "character varying",
@@ -179,6 +180,34 @@ class SchemaMismatch(RuntimeError):
 class DbStatus:
     immich_version: str | None = None
     owner_id: str | None = None
+
+
+# A random sample of the owner's photos with faces (admin "Label subjects"): faces sampled by page (TABLESAMPLE
+# SYSTEM, cheap on a large table), their photos, and each photo's face count (the admin flattens the face-weighted
+# sample to roughly uniform over photos). Asset ids and counts only.
+_SAMPLE_SQL = (
+    """
+WITH s AS (
+  SELECT asset_id FROM (
+    SELECT DISTINCT af."assetId" AS asset_id
+    FROM asset_face af TABLESAMPLE SYSTEM (%(pct)s)
+    {named_join}
+    WHERE af."ownerId" = %(owner)s AND"""
+    + _FACE_FILTER
+    + """
+  ) d ORDER BY random() LIMIT %(limit)s
+)
+SELECT s.asset_id::text, count(af.id)
+FROM s JOIN asset_face af ON af."assetId" = s.asset_id AND af."ownerId" = %(owner)s AND"""
+    + _FACE_FILTER
+    + """
+GROUP BY s.asset_id
+"""
+)
+_NAMED_JOIN = """
+  JOIN person p ON p."personGroupId" = af."personGroupId" AND p."ownerId" = af."ownerId"
+    AND p.name <> '' AND NOT p."isHidden"
+"""
 
 
 class Database:
@@ -339,6 +368,20 @@ class Database:
             {"person_id": pid, "name": name or None, "distance": round(float(d), 4), "faces": int(n)}
             for pid, name, d, n in rows[:limit]
         ]
+
+    async def sample_assets(self, limit: int = 60, *, named: bool = False) -> list[tuple[str, int]]:
+        """[(asset id, face count)] of a random sample of the owner's photos with faces (``named``: with at least one
+        named face). Tries a small page sample first and widens it on small libraries."""
+        sql = _SAMPLE_SQL.format(named_join=_NAMED_JOIN if named else "")
+        rows: list = []
+        for pct in (0.5, 5.0, 100.0):
+            async with self.pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(sql, {"pct": pct, "owner": self.status.owner_id, "limit": limit})
+                    rows = await cur.fetchall()
+            if len(rows) >= min(limit, 10):
+                break
+        return [(a, int(n)) for a, n in rows]
 
     async def persons_by_id(self, person_ids: list[str]) -> dict[str, tuple[str, bool]]:
         """{person_id: (name, hidden)} for those of the ids that are people of the owner."""

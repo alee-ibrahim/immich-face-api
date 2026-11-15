@@ -27,7 +27,7 @@ from psycopg_pool import PoolTimeout
 from . import __version__
 from . import changes as ch
 from . import metrics as m
-from .config import Settings
+from .config import ConfigError, Settings
 from .db import Database, SchemaMismatch
 from .facecache import FaceCache, same_person_rule
 from .imaging import ImageRejected, prepare
@@ -38,6 +38,7 @@ from .requestlog import FaceRecord, RequestLogWriter, RequestRecord, embedding_b
 from .scrub import scrub_breadcrumb, scrub_event
 from .security import ApiKeys, RateLimiter, token_from_headers
 from .store import Store, split_key
+from .subject import ModelError, PhotoSubjects, analyse, load_model
 
 log = logging.getLogger("immich_face_api")
 
@@ -225,6 +226,10 @@ class State:
         self.limiter = RateLimiter(settings.rate_limit_per_minute, settings.rate_limit_burst)
         self.db = Database(settings)
         self.ml = MLClient(settings.ml_url, settings.face_model, settings.min_score, settings.ml_timeout)
+        try:
+            self.subject_model = load_model(settings.subject_model_file, settings.subject_model_json)
+        except (ModelError, OSError) as exc:
+            raise ConfigError(f"FACE_API_SUBJECT_MODEL(_FILE): {exc}") from exc
         self.ml_slots = asyncio.Semaphore(settings.max_concurrent_ml)
         self.faces = (
             FaceCache(
@@ -293,15 +298,38 @@ class State:
         include_unnamed: bool = False,
         rid: str = "",
         log_faces: bool = False,
+        subject: bool = False,
     ) -> dict:
         """The whole pipeline for one image (validate, detect, search, decide). Raises HttpError.
 
-        log_faces: also return "_log" (per-face records for the request log, with crops per FACE_API_STORE_CROPS)."""
-        img, faces = await self._detect(raw, rid)
+        log_faces: also return "_log" (per-face records for the request log, with crops per FACE_API_STORE_CROPS).
+        subject: also score who the photo is about (prominence, role per face; photo type, main face)."""
+        img, faces = await self._detect(raw, rid, landmarks=subject and self.s.subject_landmarks)
         del raw
-        return await self._identify_faces(img, faces, candidates, include_unnamed, rid, log_faces)
+        return await self._identify_faces(img, faces, candidates, include_unnamed, rid, log_faces, subject)
 
-    async def _detect(self, raw: bytes, rid: str):
+    def subject_requested(self, flag: str | None) -> bool:
+        """Whether to score subjects for one request: ``flag`` is the request's ``subject`` parameter (or None)."""
+        mode = self.s.subject_scoring
+        on = flag is not None and flag.lower() in ("1", "true", "yes")
+        off = flag is not None and flag.lower() in ("0", "false", "no")
+        if flag is not None and not on and not off:
+            raise HttpError(400, "bad_request", "subject must be 0 or 1")
+        if mode == "off":
+            if on:
+                raise HttpError(400, "bad_request", "main-subject scoring is turned off on this server")
+            return False
+        return on or (mode == "always" and not off)
+
+    async def subjects(self, img, faces) -> PhotoSubjects:
+        """Main-subject scoring of one photo (CPU, in a worker thread). ``img.image``: the pixels sent to ML."""
+        t = time.perf_counter()
+        boxes = [{**f.box, "score": f.score, "landmarks": f.landmarks} for f in faces]
+        result = await asyncio.to_thread(analyse, img.image, boxes, self.subject_model)
+        m.STAGE.labels("subject").observe(time.perf_counter() - t)
+        return result
+
+    async def _detect(self, raw: bytes, rid: str, landmarks: bool = False):
         """Validate + normalise the image, then detect faces and embed them with Immich's ML. Raises HttpError."""
         s = self.s
         state = self
@@ -325,7 +353,7 @@ class State:
         t1 = time.perf_counter()
         m.INFLIGHT.inc()
         try:
-            faces = await state.ml.detect(img.encoded)
+            faces = await (state.ml.detect(img.encoded, landmarks=True) if landmarks else state.ml.detect(img.encoded))
         except MLError as exc:
             m.ML_ERRORS.inc()
             log.warning("ml error", extra={"fields": {"rid": rid, "error": str(exc)}})
@@ -336,9 +364,10 @@ class State:
         m.STAGE.labels("ml").observe(time.perf_counter() - t1)
         return img, faces
 
-    async def _identify_faces(self, img, faces, candidates, include_unnamed, rid, log_faces) -> dict:
+    async def _identify_faces(self, img, faces, candidates, include_unnamed, rid, log_faces, subject=False) -> dict:
         s = self.s
         state = self
+        ps = await self.subjects(img, faces) if subject else None
         t2 = time.perf_counter()
         embeddings = [f.embedding for f in faces]
         try:
@@ -353,7 +382,7 @@ class State:
         m.STAGE.labels("db").observe(time.perf_counter() - t2)
 
         out_faces, matched, ambiguous, logged = [], 0, 0, []
-        for face, rows in zip(faces, neighbours, strict=True):
+        for i, (face, rows) in enumerate(zip(faces, neighbours, strict=True)):
             d = decide(
                 rows,
                 max_distance=s.max_distance,
@@ -371,6 +400,9 @@ class State:
                 "distance": best.distance if best else None,
                 "ambiguous": d.ambiguous,
             }
+            if ps is not None:
+                fs = ps.faces[i]
+                entry.update(prominence=fs.prominence, role=fs.role, subject_signals=fs.signals)
             if candidates:
                 entry["candidates"] = [
                     {
@@ -388,6 +420,7 @@ class State:
             out_faces.append(entry)
             if log_faces:
                 logged.append((entry, face, rows))
+        main_entry = out_faces[ps.main_face_index] if ps is not None and ps.main_face_index is not None else None
         out_faces.sort(key=lambda f: (f["box"]["x"], f["box"]["y"]))
         log_records = await self._face_records(logged, img) if log_faces else None
         width, height, source_format = img.width, img.height, img.source_format
@@ -403,6 +436,7 @@ class State:
             "model": s.face_model,
             "max_distance": s.max_distance,
             "immich_version": state.db.status.immich_version,
+            **(subject_summary(ps, out_faces, main_entry) if ps is not None else {}),
             **({"test_mode": True} if include_unnamed else {}),
             "_stats": {"faces": len(faces), "matched": matched, "ambiguous": ambiguous, "format": source_format},
             **({"_log": log_records} if log_records is not None else {}),
@@ -441,13 +475,18 @@ class State:
             await asyncio.to_thread(cut)
         return records
 
-    async def verify(self, raw: bytes, claims: list[str], box: dict | None = None, rid: str = "") -> dict:
-        """Re-check claimed people (e.g. stored tags) against a photo. Raises HttpError. See README "POST /v1/verify"."""
+    async def verify(
+        self, raw: bytes, claims: list[str], box: dict | None = None, rid: str = "", subject: bool = False
+    ) -> dict:
+        """Re-check claimed people (e.g. stored tags) against a photo. Raises HttpError. See README "POST /v1/verify".
+
+        subject: also say per claim whether the claimed person is the photo's main subject (role, prominence)."""
         s = self.s
-        img, faces = await self._detect(raw, rid)
+        img, faces = await self._detect(raw, rid, landmarks=subject and s.subject_landmarks)
         del raw
-        t2 = time.perf_counter()
         faces = sorted(faces, key=lambda f: (f.box["x1"], f.box["y1"]))
+        ps = await self.subjects(img, faces) if subject else None
+        t2 = time.perf_counter()
         boxes = [normalise_box(f.box, img.sent_width, img.sent_height) for f in faces]
         embeddings = [f.embedding for f in faces]
         try:
@@ -483,8 +522,17 @@ class State:
                 "name": d.best.name if d.best else None,
                 "distance": d.best.distance if d.best else None,
                 "ambiguous": d.ambiguous,
+                **(
+                    {
+                        "prominence": ps.faces[i].prominence,
+                        "role": ps.faces[i].role,
+                        "subject_signals": ps.faces[i].signals,
+                    }
+                    if ps is not None
+                    else {}
+                ),
             }
-            for f, b, d in zip(faces, boxes, decisions, strict=True)
+            for i, (f, b, d) in enumerate(zip(faces, boxes, decisions, strict=True))
         ]
         if box is not None:
             scored = sorted(((iou(b, box), i) for i, b in enumerate(boxes)), reverse=True)
@@ -510,6 +558,7 @@ class State:
                 "box": None,
                 "best_person_id": None,
                 "best_name": None,
+                **({"role": None, "prominence": None, "is_main_subject": False} if ps is not None else {}),
             }
             scored = [(dists[i][target], i) for i in pool if target in dists[i]] if target else []
             if target is None:
@@ -541,6 +590,13 @@ class State:
                     best_person_id=best.person_id if best else None,
                     best_name=best.name if best else None,
                 )
+                if ps is not None:
+                    role = ps.faces[i].role
+                    entry.update(
+                        role=role,
+                        prominence=ps.faces[i].prominence,
+                        is_main_subject=role == "main" and verdict == "match",
+                    )
             entry["verdict"] = verdict
             m.VERIFY_CLAIMS.labels(verdict).inc()
             out_claims.append(entry)
@@ -554,6 +610,13 @@ class State:
             "model": s.face_model,
             "max_distance": s.max_distance,
             "immich_version": self.db.status.immich_version,
+            **(
+                subject_summary(
+                    ps, out_faces, out_faces[ps.main_face_index] if ps.main_face_index is not None else None
+                )
+                if ps is not None
+                else {}
+            ),
             "_stats": {
                 "faces": len(faces),
                 "matched": sum(1 for d in decisions if d.best),
@@ -751,6 +814,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             include_unnamed = request.query_params.get("include_unnamed") in ("1", "true")
             if include_unnamed and not s.test_mode:
                 raise HttpError(400, "bad_request", "include_unnamed is only available in test mode")
+            subject = state.subject_requested(request.query_params.get("subject"))
 
             body = await read_body(request, s.max_upload_bytes)
             raw = extract_image(request.headers.get("content-type", ""), body)
@@ -762,6 +826,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 include_unnamed=include_unnamed,
                 rid=request.state.rid,
                 log_faces=state.writer is not None,
+                subject=subject,
             )
             del raw
             stats = result.pop("_stats")
@@ -886,8 +951,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             q = request.query_params
             claims = person_ids(fields.get("person_id", []) + q.getlist("person_id"), s.verify_max_claims)
             box = parse_box((fields.get("box") or [q.get("box")])[0])
+            flag = (fields.get("subject") or [q.get("subject")])[0]
+            subject = flag is not None and state.subject_requested(flag)  # verify: only when asked (subject=1)
             request.state.log = {"image_bytes": len(raw)}
-            result = await state.verify(raw, claims, box, rid=request.state.rid)
+            result = await state.verify(raw, claims, box, rid=request.state.rid, subject=subject)
             del raw
             stats = result.pop("_stats")
             request.state.fields = {**stats, "claims": len(claims)}
@@ -934,7 +1001,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     total_bytes += len(raw)
                     claims = person_ids(item.get("person_ids") or [], s.verify_max_claims, "person_ids")
                     box = parse_box(item.get("box"))
-                    result = await state.verify(raw, claims, box, rid=request.state.rid)
+                    flag = item.get("subject")
+                    subject = flag is not None and state.subject_requested(str(int(bool(flag))))
+                    result = await state.verify(raw, claims, box, rid=request.state.rid, subject=subject)
                     del raw
                     stats = result.pop("_stats")
                     faces += stats["faces"]
@@ -953,6 +1022,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return error_response(exc)
 
     return app
+
+
+def subject_summary(ps: PhotoSubjects, out_faces: list[dict], main_entry: dict | None) -> dict:
+    """The per-photo part of main-subject scoring; main_face_index points into the answer's (sorted) faces."""
+    main_index = next((i for i, f in enumerate(out_faces) if f is main_entry), None) if main_entry else None
+    return {
+        "photo_type": ps.photo_type,
+        "main_face_index": main_index,
+        "subject_model_version": ps.model_version,
+    }
 
 
 def request_record(request: Request, endpoint: str, status: int, elapsed: float) -> RequestRecord:

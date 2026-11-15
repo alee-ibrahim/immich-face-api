@@ -8,7 +8,7 @@
 a photo; it finds the faces and returns, for each one, the **named Immich person** it most likely shows (or `null`).
 
 - [Why](#why) · [How it works](#how-it-works) · [Quick start](#quick-start-docker-compose) · [Configuration](#configuration)
-- [Admin UI](#admin-ui-optional) · [Request log and face crops](#request-log-and-face-crops) · [API](#api) · [Client examples](#client-examples) · [Matching](#the-matching-algorithm) · [People changes](#people-changes) · [Security](#security-model)
+- [Admin UI](#admin-ui-optional) · [Request log and face crops](#request-log-and-face-crops) · [API](#api) · [Client examples](#client-examples) · [Matching](#the-matching-algorithm) · [Main subject](#main-subject) · [People changes](#people-changes) · [Security](#security-model)
 - [Privacy](#privacy-and-biometric-data) · [Compatibility](#compatibility-and-the-version-pin) · [Upgrading](#upgrading-immich)
 - [Troubleshooting](#troubleshooting) · [FAQ](#faq) · [Limitations](#limitations) · [People labeler](#people-labeler) · [Development](#development)
 
@@ -65,7 +65,9 @@ For each request:
 4. **Search:** for each face, the k nearest faces (exact cosine distance) among faces of persons that belong to **one
    Immich user** (the library owner), have a **non-empty name** and are **not hidden**, on assets that are not deleted,
    trashed or in the locked folder.
-5. **Decide:** "nearest face wins" (see [Matching](#the-matching-algorithm)) and answer. Nothing is kept.
+5. **Decide:** "nearest face wins" (see [Matching](#the-matching-algorithm)).
+6. **Main subject:** score how much each face is what the photo is *about* (size, sharpness, position, ...; see
+   [Main subject](#main-subject)) and answer. Nothing is kept.
 
 ## Quick start (docker compose)
 
@@ -145,6 +147,9 @@ over the plain variable.
 | `FACE_API_READINESS_INTERVAL` | `60` | seconds between readiness checks |
 | `FACE_API_SENTRY_DSN` / `_FILE` | | Sentry or GlitchTip DSN; events are scrubbed (see [Security](#security-model)) |
 | `FACE_API_ENVIRONMENT` | `production` | Sentry environment |
+| `FACE_API_SUBJECT_SCORING` | `always` | [main-subject scoring](#main-subject): `always` (identify; `?subject=0` turns it off per request), `request` (only with `?subject=1`) or `off` |
+| `FACE_API_SUBJECT_LANDMARKS` | `false` | head pose (yaw, pitch, `frontal`) from the detector's landmarks: one more, detection-only ML call per image, in parallel |
+| `FACE_API_SUBJECT_MODEL_FILE` | built-in | the subject model (weights and thresholds) as versioned JSON, e.g. written by `calibrate`; `FACE_API_SUBJECT_MODEL` takes the JSON inline |
 
 API port **8080**. Image `ghcr.io/alee-ibrahim/immich-face-api` (Alpine, uid 65532, read-only root filesystem works,
 nothing written to disk; amd64 and arm64 for releases).
@@ -169,14 +174,16 @@ metrics, never the key.
 `version_history` only, read-only transactions, a TLS-only `pg_hba` line. The service also sets
 `default_transaction_read_only` and a 15 s statement timeout on every connection (the face cache and the people
 change log raise it for their bulk reads, within a read-only transaction). The change log needs no other grant: it
-reads `person` and `asset_face` (including `asset_face."updateId"`), not Immich's audit tables.
+reads `person` and `asset_face` (including `asset_face."updateId"`), not Immich's audit tables. The admin's *Label
+subjects* samples photos from `asset_face."assetId"`, also covered.
 
 ## Admin UI (optional)
 
-A small web UI for the people who run the service: **usage analytics** and **API keys per app**. It is a separate
+A small web UI for the people who run the service: **usage analytics** and **API keys per app**, and a labelling
+page for curators that calibrates [main-subject scoring](#main-subject). It is a separate
 process from the same image (`python -m immich_face_api admin`, port **8081**). Keep it on an internal network and
 never route it publicly; the API port (8080) never serves it. Its paths (`/`, `/login`, `/auth/callback`, `/logout`,
-`/usage`, `/requests`, `/missed`, `/faces`, `/crops`, `/privacy`, `/keys`, `/try`, `/docs`, `/static`) do not overlap the API's (`/v1/*`, `/healthz`, `/openapi.json`), so one
+`/usage`, `/requests`, `/missed`, `/faces`, `/crops`, `/privacy`, `/keys`, `/try`, `/subjects`, `/docs`, `/static`) do not overlap the API's (`/v1/*`, `/healthz`, `/openapi.json`), so one
 internal hostname can serve both: route `/v1/` and `/healthz` to the API, everything else to the admin.
 
 | Page | What |
@@ -186,7 +193,8 @@ internal hostname can serve both: route `/v1/` and `/healthz` to the API, everyt
 | Requests | the request log: what each app asked and what was found, filterable; detail with face crops; *Stored data* with retention, sizes and **delete now**. See [Request log and face crops](#request-log-and-face-crops) |
 | Missed faces | unknown, ambiguous and near-threshold faces with crops and their nearest named people; *find similar in Immich* |
 | Apps & keys | create a key for an app (owner, label, rate limit per minute, expiry); the key is **shown once**; revoke; last used; an audit list of who created or revoked what. Keys from `FACE_API_API_KEYS` are listed read-only |
-| Try it | upload a photo, see the boxes and names drawn over it (same pipeline as `/v1/identify`); nothing is stored or counted |
+| Try it | upload a photo, see the boxes, names and subject roles drawn over it (same pipeline as `/v1/identify`); nothing is stored or counted |
+| Label subjects | curators mark the **main** subject, **co-subjects** and **background** faces of sample photos (random Immich photos with faces, or an upload) to [calibrate](#calibration) main-subject scoring. The only page a **curator** sees |
 | Docs | quick start, authentication, endpoints with examples (curl, PHP/Laravel, Python, Node; language tabs and copy buttons), limits, errors, best practices; an API reference rendered from the bundled OpenAPI document and a download of `openapi.json`. The base URL shown is `FACE_API_DOCS_BASE_URL` (default: the request's own host) |
 
 **Keys made in the UI** look like `ifa_<8 hex>_<43 random characters>`. The prefix is stored in clear (to tell keys
@@ -204,8 +212,11 @@ endpoint, and a latency histogram): no images, embeddings, names, IP addresses o
 
 **Sign-in.** Any OpenID Connect provider (`FACE_API_OIDC_ISSUER`, or `FACE_API_OIDC_TENANT_ID` for Microsoft Entra,
 plus client id and secret; redirect URI `<FACE_API_PUBLIC_URL>/auth/callback`). Who may sign in: by default whoever the
-provider lets through (for example an Entra app with *Assignment required*); to require a claim, set
-`FACE_API_OIDC_ADMIN_CLAIM` (e.g. `roles` or `groups`) and `FACE_API_OIDC_ADMIN_VALUES` (comma-separated). Without
+provider lets through (for example an Entra app with *Assignment required*), all as admins. **Roles:** set
+`FACE_API_OIDC_ADMIN_CLAIM` to the claim that carries roles or groups (e.g. `roles` for Entra app roles, or `groups`),
+`FACE_API_OIDC_ADMIN_VALUES` to the values that make an **admin** (every page) and `FACE_API_OIDC_CURATOR_VALUES` to
+those that make a **curator** (only *Label subjects*; other pages redirect there); anyone with neither is refused.
+See [Curator access with Microsoft Entra](#curator-access-with-microsoft-entra). Without
 OIDC, a bootstrap admin token (`FACE_API_ADMIN_TOKEN`) signs in, for local use. Sessions are signed cookies (8 h,
 `SameSite=Lax`, `Secure`), every form carries a CSRF token, and a strict Content-Security-Policy allows no inline script
 or style.
@@ -225,7 +236,10 @@ or style.
 | `FACE_API_OIDC_TENANT_ID` | | Microsoft Entra shortcut for the issuer |
 | `FACE_API_OIDC_CLIENT_ID` / `_FILE`, `FACE_API_OIDC_CLIENT_SECRET` / `_FILE` | | |
 | `FACE_API_OIDC_SCOPES` | `openid email profile` | |
-| `FACE_API_OIDC_ADMIN_CLAIM`, `FACE_API_OIDC_ADMIN_VALUES` | | optional claim filter (see above) |
+| `FACE_API_OIDC_ADMIN_CLAIM`, `FACE_API_OIDC_ADMIN_VALUES` | | optional role claim and its admin values (comma-separated, see above) |
+| `FACE_API_OIDC_CURATOR_VALUES` | | values of the same claim that give the curator role (*Label subjects* only) |
+| `FACE_API_IMMICH_API_URL` | `FACE_API_IMMICH_URL` | Immich server URL for *Label subjects* to fetch sample previews (in-cluster URL is best) |
+| `FACE_API_IMMICH_API_KEY` / `_FILE` | | an Immich API key of the library owner with **only** the `asset.view` permission; without it curators label uploads only |
 | `FACE_API_ADMIN_TOKEN` / `_FILE` | | bootstrap sign-in when OIDC is not configured |
 | `FACE_API_DOCS_BASE_URL` | request host | the API base URL shown in the admin docs (e.g. the public API host) |
 
@@ -314,6 +328,7 @@ Body: `multipart/form-data` with the file in field **`image`**, or the raw image
 | --- | --- | --- |
 | `candidates` | `0` | also return up to N ranked candidates per face |
 | `include_unnamed` | off | test mode only: also match unnamed clusters (name `null`), to check matching on a library where few people are named |
+| `subject` | per `FACE_API_SUBJECT_SCORING` | `1`/`0`: score (or skip) [main subjects](#main-subject) for this request |
 
 ```bash
 curl -sS "https://faces.example.org/v1/identify?candidates=3" -H "Authorization: Bearer $KEY" -F image=@event.jpg
@@ -339,15 +354,21 @@ curl -sS "https://faces.example.org/v1/identify?candidates=3" -H "Authorization:
       "box": {"x": 0.702, "y": 0.22, "w": 0.055, "h": 0.094},
       "detection_score": 0.79,
       "person_id": null, "name": null, "confidence": null, "distance": null, "ambiguous": false,
+      "prominence": 0.08, "role": "background", "subject_signals": {"area": 0.0052, "...": "..."},
       "candidates": []
     }
   ],
   "image": {"w": 6000, "h": 4000},
   "model": "buffalo_l",
   "max_distance": 0.5,
-  "immich_version": "3.4.1"
+  "immich_version": "3.4.1",
+  "photo_type": "small_group",
+  "main_face_index": 0,
+  "subject_model_version": "default-1"
 }
 ```
+
+(The first face also has `prominence`, `role` and `subject_signals`; shortened here.)
 
 | Field | Meaning |
 | --- | --- |
@@ -359,6 +380,12 @@ curl -sS "https://faces.example.org/v1/identify?candidates=3" -H "Authorization:
 | `confidence` | 1 − distance: a hint for a human, **not** a probability |
 | `ambiguous` | the runner-up is within `FACE_API_AMBIGUITY_MARGIN`: show the candidates, pre-select nothing |
 | `candidates[].votes` | how many of the k nearest faces belong to that person |
+| `prominence` | 0–1: how much the photo is about this face (see [Main subject](#main-subject)) |
+| `role` | `main` (the photo is about this person), `co_subject` (one of two or a few people it is about) or `background` |
+| `subject_signals` | the raw measurements behind `prominence` (size, dominance, sharpness, position, pose, ...) |
+| `photo_type` | `portrait` (one subject), `small_group` (2–5), `crowd` (more), `none` (no face) |
+| `main_face_index` | index into `faces` of the main face, or `null` (no single main subject) |
+| `subject_model_version` | the version of the weights that scored it |
 
 ### `POST /v1/verify`
 
@@ -369,7 +396,8 @@ stored (the request log keeps only the request line: app, status, latency, image
 
 Body: `multipart/form-data` with **`image`**, one or more **`person_id`** fields (or comma-separated; at most
 `FACE_API_VERIFY_MAX_CLAIMS`, 10) and optionally **`box`** (`x,y,w,h` or JSON, as returned by identify: then only the
-face overlapping it is compared, IoU ≥ 0.3). With a raw image body, pass `person_id` and `box` in the query.
+face overlapping it is compared, IoU ≥ 0.3) and **`subject=1`** (also say whether the claimed person is the photo's
+main subject). With a raw image body, pass `person_id`, `box` and `subject` in the query.
 
 ```bash
 curl -sS "https://faces.example.org/v1/verify" -H "Authorization: Bearer $KEY" \
@@ -401,6 +429,11 @@ curl -sS "https://faces.example.org/v1/verify" -H "Authorization: Bearer $KEY" \
 | `no_face` | no face detected, or none at `box` |
 | `no_reference` | the person exists but has no faces left to compare with |
 | `person_gone` | the claimed id is `deleted`, `hidden`, `unnamed` or `unknown` (see `status`) |
+
+With `subject=1` every claim also gets `role` and `prominence` of its face and **`is_main_subject`** (`true` only for
+a `match` on the face whose role is `main`), the faces get `prominence`, `role` and `subject_signals`, and the answer
+gets `photo_type`, `main_face_index` and `subject_model_version`. Without it the answer is unchanged. (Batch items:
+`"subject": true`.)
 
 `status` is as in [`/v1/people/resolve`](#post-v1peopleresolve): a person that was **merged** is followed to the person
 it was merged into (`current_person_id`, `merged_via`) and compared with that one. The distance is to the nearest of
@@ -608,6 +641,156 @@ float16 matrix and searches it with one matrix product (numpy):
 **Thresholds.** `distance` is the same measure Immich uses for clustering. 0.5 matches Immich's default; a lower value
 (0.4–0.45) gives fewer but safer suggestions, which is usually right when a wrong public name is worse than none.
 
+## Main subject
+
+Recognising a person in a photo is not the same as the photo being **about** them. A member's profile page should show
+the portrait, the speech at the podium, the handshake, not the photo where the member is a small, blurred face in the
+background or one of 30 faces in a chamber shot. For every face the API therefore also returns how **prominent** it is
+(`prominence`, 0–1) and a **role**: `main`, `co_subject` or `background`; per photo a `photo_type` and the
+`main_face_index`. It is computed in the API process from the decoded image and the detector's boxes: no extra model,
+about **15–30 ms per photo** on one CPU core (a fixed ~13 ms for the image plus well under 1 ms per face; 43 faces:
+23 ms), so it is on by default (`FACE_API_SUBJECT_SCORING`).
+
+**For profile pages:** use the photos where the member's `person_id` has `role` in `{main, co_subject}`; with
+`main` only you get the photos that are about that member alone.
+
+### Signals
+
+Measured per face (in `subject_signals`):
+
+| Signal | What |
+| --- | --- |
+| `area`, `size` | face box area / image area, and its square root (the face's side relative to the image) |
+| `face_px` | the face's short side in pixels of the analysed image (at most 1440 px long) |
+| `dominance` | area / the largest face's area (1 = the largest face) |
+| `lead` | area / the largest **other** face's area (> 1 only for the largest face; `null` for a lone face): how clearly a face stands out |
+| `sharpness` | focus of the face, 0–1: the share of its pixel-to-pixel detail that a slight re-blur removes ("blur effect" measure, Crete et al. 2007), on the crop resampled to 48 px so faces of every size are judged at one scale. Hardly depends on contrast or content (smooth skin vs glasses and beards). In focus ≈ 0.5–0.7, visibly blurred < 0.4 |
+| `sharpness_rel` | sharpness / the photo's sharpest face |
+| `focus_bg` | log2(face sharpness / median sharpness of textured background tiles), both on the photo at 640 px: > 0 when the face is sharper than its surroundings (a subject against a soft background); `null` without textured background |
+| `centrality`, `thirds` | 1 at the centre / on a rule-of-thirds point, falling to 0 |
+| `edge_cut`, `touches_edge` | share of the detector's box outside the frame; box within 1% of an edge |
+| `yaw`, `pitch`, `frontal` | head pose from the detector's 5 landmarks, `frontal` = cos²(yaw)·cos(pitch). Immich's ML returns landmarks only from a detection-only call, so these need `FACE_API_SUBJECT_LANDMARKS=true` (one more detection per image, about a quarter of the ML work of identify, run in parallel); otherwise `null` and the model uses a neutral 0.5 |
+| `detection_score` | the detector's confidence |
+| `luminance`, `clipped`, `exposure` | mean brightness of the face, share of near-black/near-white pixels, and 1 = well exposed |
+
+Per photo: `photo_type` from the number of faces that **could** be subjects (at least 20% of the largest face's area,
+neither tiny nor blurred): `portrait` (1), `small_group` (2–5), `crowd` (more). A speaker with a sea of tiny faces
+behind is a portrait; a blurred head in the foreground does not make a group.
+
+### Score and roles
+
+`prominence = sigmoid(intercept + Σ wᵢ·xᵢ)` over these features (each scaled to about 0–1): `size`
+((log₁₀ area + 4) / 4), `dominance` and `lead` (both measured against the faces that could be subjects), `sharpness`,
+`sharpness_rel`, `focus_bg`, `position` (max of centrality and thirds), `edge_cut`, `frontal`, `detection_score`,
+`exposure` and `crowd` (log₂ of the photo's subject count / 4). Default weights (model `default-1`, set by hand on
+public-domain and archive photos, to be [calibrated](#calibration)):
+
+| size | dominance | lead | sharpness | sharpness_rel | focus_bg | position | edge_cut | frontal | detection_score | exposure | crowd | intercept |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8.0 | 2.5 | 2.5 | 2.0 | 3.0 | 1.5 | 2.0 | −3.0 | 0.8 | 1.5 | 0.5 | −3.0 | −12.0 |
+
+Then the rules (thresholds in the same model file):
+
+1. **Never a subject** (role `background`, prominence capped below the thresholds): tiny faces (side < 4% of the image
+   or < 28 px) and blurred faces (sharpness < 0.3, or < 55% of the sharpest face's).
+2. `co_subject` when prominence ≥ `co_min` (0.45).
+3. The most prominent face is `main` when its prominence ≥ `main_min` (0.45) **and** it has no rival: no other
+   co-subject at least 90% of its size (`tie_dominance`: a handshake, two people side by side), or at least 60% of its
+   size and within 0.25 prominence (`co_dominance`, `co_margin`). Otherwise there is no main face; the subjects are
+   co-subjects.
+4. In a `crowd` photo the top face is main only when it is clearly dominant: at least 2.5× the next face's area
+   (`crowd_dominance`).
+
+### The model file
+
+Weights and thresholds are one JSON document with a **version**; the API reports it as `subject_model_version`, so
+results can be tied to the weights that made them. Change it without a code change:
+
+```json
+{
+  "version": "cal-20261201-0930",
+  "intercept": -11.2,
+  "weights": {"size": 7.4, "dominance": 2.1, "lead": 2.8, "sharpness": 1.6, "sharpness_rel": 3.3, "focus_bg": 1.2,
+              "position": 1.9, "edge_cut": -2.6, "frontal": 0.9, "detection_score": 1.1, "exposure": 0.4, "crowd": -2.7},
+  "rules": {"main_min": 0.5, "co_min": 0.4, "co_margin": 0.25, "tie_dominance": 0.9}
+}
+```
+
+Missing weights count as 0, missing rules keep their defaults; unknown names are refused at start-up. Mount it and set
+`FACE_API_SUBJECT_MODEL_FILE` on the API and the admin (the admin uses it for the predictions it records).
+
+### Calibration
+
+1. **Label.** Curators open *Label subjects* in the admin UI. *Label a random photo* draws a random photo with faces
+   from the owner's library (faces sampled from `asset_face`, flattened to about uniform per photo, skipping photos
+   already labelled; *… with a named person* only photos with a named face), fetches its preview from Immich's API
+   with a view-only key, runs exactly the API's detection and scoring, and shows the photo with numbered boxes. The
+   curator clicks each box to cycle *background → main → co-subject* (at most one main), or *Not sure* to skip, then
+   *Save and next*. The model's own prediction is not shown, so it cannot anchor the curator. A photo can also be
+   uploaded instead (it is analysed in memory and shown from the browser's memory only).
+2. **What is stored:** in the store's `subject_sample` table, per photo: the Immich asset id (or nothing for uploads),
+   the face boxes, the measured signals, the model's prediction, the labels, who and when. **No image, no embedding.**
+   The preview is fetched from Immich again each time the labelling page shows it, only for the curator who drew it (or
+   an admin), only for a day, never cached. Unlabelled samples are deleted after a day.
+3. **Fit.** `python -m immich_face_api calibrate --out subject-model.json` (with the store settings) fits the weights
+   by L2-regularised logistic regression of "subject" (main or co-subject) vs background on the stored signals, then
+   grid-searches `main_min`, `co_min`, `co_margin` and `tie_dominance` for the best mean F1 of "main" and "subject".
+   It prints the current model's precision/recall on the labels, a 5-fold **cross-validated** precision/recall of the
+   new model (by photo, so it is honest), and writes the new model with version `cal-<date>-<time>` and the metrics.
+   `--labels file.jsonl` / `--export file.jsonl` work with exported labels instead of the store.
+4. **Deploy:** review the numbers (precision of "main" matters most for profile pages), mount the file, set
+   `FACE_API_SUBJECT_MODEL_FILE`, restart. Keep the old file to roll back.
+
+How many labels: aim for 300+ photos with a mix of portraits, speeches, handshakes, small groups and crowd/chamber
+shots (about 2 hours of curator time at 20–30 s per photo); `calibrate` refuses fewer than 30 photos or fewer than 5
+main and 5 background faces (`--force` overrides). The admin page shows how often the current model agrees with the
+labels. Recalibrate when the agreement drops or the kind of photos changes.
+
+### Curator access with Microsoft Entra
+
+Curators sign in to the admin UI like admins but only see *Label subjects*. With Entra ID and *Assignment required*:
+
+1. **App roles:** in the admin app's *App registration* → *App roles*, create `Admin` (value `admin`) and `Curator`
+   (value `curator`), allowed member types *Users/Groups*.
+2. **Assign:** in *Enterprise applications* → the app → *Users and groups*, assign the admin group (for example IT)
+   the `Admin` role and the curator group(s) the `Curator` role. (Group assignment needs Entra ID P1; otherwise
+   assign users.) Change the existing assignments from *Default Access* to `Admin` **first**, or admins lose access in
+   step 3.
+3. **Configure** the admin: `FACE_API_OIDC_ADMIN_CLAIM=roles`, `FACE_API_OIDC_ADMIN_VALUES=admin`,
+   `FACE_API_OIDC_CURATOR_VALUES=curator`. Entra puts assigned app roles into the ID token's `roles` claim; no extra
+   API permission is needed.
+4. **Immich preview access** (optional, for random photos): as the library owner in Immich create an API key with only
+   the `asset.view` permission and give it to the admin as `FACE_API_IMMICH_API_KEY_FILE`, with
+   `FACE_API_IMMICH_API_URL` pointing at the Immich server (allow that egress).
+
+With Google, Keycloak or another provider, use any claim that lists groups or roles (`groups`, `roles`, ...).
+
+### Not built yet: a profile-photo index
+
+Scoring happens per request today, on photos a client sends. Profile pages want the reverse: *all photos where member
+X is the subject*. A design for that (not implemented):
+
+- **Batch job** (`python -m immich_face_api subjects index`, a nightly CronJob): for every asset with at least one
+  named face in the owner's library, fetch the preview from Immich (view-only key), detect + score as above, and write
+  one row per face to the store: `asset_id, face box, person_id (from Immich's asset_face, not re-matched),
+  prominence, role, photo_type, model_version, scored_at`. Incremental by `asset_face.updatedAt`; rescore everything
+  when the model version changes. Cost: ~1–2 s of ML CPU per photo (detection is the expensive part; the scoring is
+  ~20 ms), so ~1.4 M photos ≈ 2–3 CPU-weeks at full size, or restrict to photos with named members (a few hundred
+  thousand) and spread it over nights. Immich's own `asset_face` boxes could replace the re-detection to make it
+  ~10× cheaper, at the cost of no detection score and landmarks.
+- **Endpoint** `GET /v1/people/{person_id}/photos?role=main,co_subject&limit=&cursor=` → `[{asset_id, taken_at,
+  role, prominence, box}]`, newest first, paged.
+- **Open questions.** (1) *How would the website show these photos?* Immich is internal and the website has its own
+  gallery: an Immich asset id means nothing to it. Either the website's gallery photos are matched to Immich assets
+  (by file hash or name at upload time, then the index answers "which of *your* photos"), or the API serves resized
+  copies (a new public image route: bandwidth, caching, and every archive photo of a named person becomes publicly
+  fetchable by id), or staff pick from the list and the website imports the chosen photos. The first keeps the
+  boundary as it is. (2) *Privacy:* a per-person photo index is a stronger biometric product than per-request
+  tagging (everything about one person in one call): restrict it to people who consent or have a public role (e.g.
+  members, not staff or visitors), keep the index in the store with its own retention, log its use, and document it
+  in the DPIA. (3) *Freshness:* names change in Immich; join `person_id` at read time and use the change log for the
+  website's copy.
+
 ## People changes
 
 Apps that store tags (photo → person) need to know when curators **merge**, **split**, **rename** or **delete** people
@@ -728,6 +911,8 @@ What the design does to help:
   and by default a [request log](#request-log-and-face-crops) (names, person ids, distances; 90 days); **face crops and
   embeddings only if you switch them on** (`FACE_API_STORE_CROPS`; 30 days). Everything has a retention and a
   delete-now button and command.
+- Main-subject labels (admin *Label subjects*) keep face boxes, measured signals and labels per photo: no image, no
+  embedding; Immich previews are fetched and passed through only while a curator labels.
 - It only returns names a curator chose to type into Immich, for one owner's library; unnamed and hidden people are
   never returned (except in test mode, and then without a name).
 - It is built for **suggestions that a human confirms**, not for automatic identification; do not build a public

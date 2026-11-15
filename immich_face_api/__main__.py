@@ -6,6 +6,10 @@ elif len(sys.argv) > 1 and sys.argv[1] == "purge":
     from .purge import main as purge_main
 
     sys.exit(purge_main(sys.argv[2:]))
+elif len(sys.argv) > 1 and sys.argv[1] == "calibrate":
+    from .calibrate import main as calibrate_main
+
+    sys.exit(calibrate_main(sys.argv[2:]))
 else:
     from .app import main
 

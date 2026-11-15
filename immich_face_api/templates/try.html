@@ -8,13 +8,14 @@
       <input type="file" name="image" required accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif"></label>
     <button>Who is this?</button>
   </form>
-  <p class="muted">Runs the same pipeline as <code>POST /v1/identify</code> with 3 candidates. The photo is shown from your
+  <p class="muted">Runs the same pipeline as <code>POST /v1/identify</code> with 3 candidates (and main-subject scoring:
+  <span class="key-main">main</span>, <span class="key-co">co-subject</span>, <span class="key-bg">background</span>). The photo is shown from your
   browser's memory; the server keeps nothing and does not count this in the usage statistics.</p>
 </div>
 <div id="message" class="notice hidden"></div>
 <div id="stage" class="stage hidden"><img id="photo" alt="The uploaded photo with the detected faces outlined"></div>
 <div class="scroll"><table class="cards">
-  <thead><tr><th>#</th><th>Name</th><th>Distance</th><th>Ambiguous</th><th>Candidates</th></tr></thead>
+  <thead><tr><th>#</th><th>Name</th><th>Distance</th><th>Ambiguous</th><th>Subject</th><th>Candidates</th></tr></thead>
   <tbody id="result"></tbody>
 </table></div>
 <script src="/static/try.js"></script>

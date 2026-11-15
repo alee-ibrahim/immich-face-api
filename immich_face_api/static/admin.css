@@ -91,6 +91,21 @@ svg.chart .hit:hover .bar { opacity: .85; }
 .stage img { max-width: 100%; max-height: 70vh; display: block; border-radius: 6px; }
 .stage .face { position: absolute; border: 2px solid var(--box); border-radius: 3px; }
 .stage .face.known { border-color: var(--good); }
+/* main-subject roles (Try it, Label subjects) */
+.stage .face.role-main { border: 3px solid #16a34a; }
+.stage .face.role-co_subject { border: 3px solid #2563eb; }
+.stage .face.role-background { border: 2px dashed #9aa3b2; }
+.key-main { color: #16a34a; font-weight: 600; } .key-co { color: #2563eb; font-weight: 600; } .key-bg { color: #9aa3b2; font-weight: 600; }
+.stage.labeling .face { cursor: pointer; }
+.stage.labeling .face span { pointer-events: none; }
+.stage.labeling img { width: auto; height: auto; }
+.stage .placeholder { width: min(900px, 90vw); background: var(--chip); color: var(--muted); border-radius: 6px;
+  display: flex; align-items: center; justify-content: center; text-align: center; padding: 12px; box-sizing: border-box; }
+.face-roles { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); margin: 12px 0; }
+.face-role { border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; display: flex; gap: 12px; flex-wrap: wrap; }
+.face-role legend { font-size: 12px; color: var(--muted); padding: 0 4px; }
+.face-role label { display: inline-flex; gap: 4px; align-items: center; }
+a.btn.ghost-btn { background: transparent; color: var(--accent); border: 1px solid var(--line); }
 .stage .face span { position: absolute; left: -2px; top: 100%; margin-top: 2px; background: var(--panel);
   color: var(--ink); font-size: 12px; padding: 0 5px; border-radius: 4px; white-space: nowrap; border: 1px solid var(--line); }
 .hidden { display: none; }
