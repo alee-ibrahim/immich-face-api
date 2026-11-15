@@ -120,6 +120,9 @@ class Settings:
     face_cache: bool = True
     face_cache_per_person: int = 100
     face_cache_refresh_seconds: int = 300
+    face_cache_max_faces: int = 1_000_000  # total cap (~1 GiB float16); 0 = none
+    face_cache_idle_seconds: int = 0  # API: always loaded
+    admin_face_cache_idle_seconds: int = 1800  # admin: loaded on first "Try it", dropped after 30 min idle
     max_candidates: int = 5
     ambiguity_margin: float = 0.03
     # same-name candidates whose centroids are this close are one (split) person, not an ambiguity; 0 = off
@@ -239,6 +242,9 @@ class Settings:
             face_cache=_bool("FACE_CACHE", True),
             face_cache_per_person=_int("FACE_CACHE_PER_PERSON", 100, 1, 100_000),
             face_cache_refresh_seconds=_int("FACE_CACHE_REFRESH_SECONDS", 300, 10, 86_400),
+            face_cache_max_faces=_int("FACE_CACHE_MAX_FACES", 1_000_000, 0, 50_000_000),
+            face_cache_idle_seconds=_int("FACE_CACHE_IDLE_SECONDS", 0, 0, 7 * 86_400),
+            admin_face_cache_idle_seconds=_int("ADMIN_FACE_CACHE_IDLE_SECONDS", 1800, 0, 7 * 86_400),
             max_candidates=_int("MAX_CANDIDATES", 5, 1, 20),
             ambiguity_margin=_float("AMBIGUITY_MARGIN", 0.03, 0.0, 0.5),
             same_name_max_distance=_float("SAME_NAME_MAX_DISTANCE", 0.6, 0.0, 2.0),

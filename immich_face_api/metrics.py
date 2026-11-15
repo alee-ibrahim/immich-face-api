@@ -35,3 +35,16 @@ CHANGES_EVENTS = Counter("face_api_people_change_events_total", "People change e
 CHANGES_ERRORS = Counter("face_api_people_change_errors_total", "Failed people change-log checks")
 CHANGES_LAST_CHECK = Gauge("face_api_people_change_last_check_timestamp_seconds", "Last successful change-log check")
 VERIFY_CLAIMS = Counter("face_api_verify_claims_total", "Claims checked by /v1/verify", ["verdict"])
+FACE_CACHE_FACES = Gauge("face_api_face_cache_faces", "Named faces held in the in-memory face cache")
+FACE_CACHE_PEOPLE = Gauge("face_api_face_cache_people", "Named people in the in-memory face cache")
+FACE_CACHE_BYTES = Gauge("face_api_face_cache_bytes", "Memory of the face cache matrix (float16) and centroids")
+FACE_CACHE_PER_PERSON = Gauge(
+    "face_api_face_cache_per_person", "Faces cached per person (FACE_CACHE_PER_PERSON, lowered by the total cap)"
+)
+FACE_CACHE_LOADED = Gauge("face_api_face_cache_loaded_timestamp_seconds", "When the face cache was last rebuilt")
+FACE_CACHE_REFRESH = Histogram(
+    "face_api_face_cache_refresh_seconds",
+    "Time to rebuild the face cache",
+    buckets=(1, 2, 5, 10, 20, 30, 60, 120, 300),
+)
+FACE_CACHE_REFRESH_ERRORS = Counter("face_api_face_cache_refresh_errors_total", "Failed face cache rebuilds")

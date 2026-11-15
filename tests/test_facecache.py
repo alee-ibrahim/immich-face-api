@@ -7,7 +7,17 @@ import numpy as np
 import psycopg
 import pytest
 
-from immich_face_api.facecache import DIM, FaceCache, build, same_person_rule, search, vector_from_pg
+from immich_face_api import metrics as m
+from immich_face_api.facecache import (
+    DIM,
+    Builder,
+    FaceCache,
+    build,
+    per_person_cap,
+    same_person_rule,
+    search,
+    vector_from_pg,
+)
 
 from .conftest import synthetic_jpeg
 from .test_app import AUTH, FACES, FakeDB, FakeML, make
@@ -82,6 +92,14 @@ class SigDB:
         self.loads += 1
         return [("p1", "Alice Example", pg_binary(np.ones(DIM)))]
 
+    async def named_face_counts(self):
+        return [1]
+
+    async def iter_named_faces(self, per_person, batch=2048):
+        rows = await self.named_faces(per_person)
+        for i in range(0, len(rows), batch):
+            yield rows[i : i + batch]
+
 
 def test_refresh_only_on_change():
     async def run():
@@ -153,6 +171,9 @@ async def test_identify_split_person_not_ambiguous_but_namesakes_are(settings):
         async def named_faces(self, per_person):
             return self.rows
 
+        async def named_face_counts(self):
+            return [len(self.rows)]
+
     async def identify(rows):
         app, c = make(settings)
         st = app.state.face
@@ -171,3 +192,85 @@ async def test_identify_split_person_not_ambiguous_but_namesakes_are(settings):
     namesakes = split + [("s2", "Jane Example", pg_binary(far))] * 3
     f = await identify(namesakes)
     assert f["ambiguous"] is True
+
+
+def test_builder_batches_equal_one_build_and_grow():
+    rng = np.random.default_rng(11)
+    rows = [(f"p{i % 7}", f"P{i % 7}", pg_binary(rng.normal(size=DIM))) for i in range(1000)]
+    whole = build(rows)
+    for capacity in (1000, 10, 0):  # exact, too small (grows), unknown
+        b = Builder(capacity, 3)
+        for i in range(0, len(rows), 97):
+            b.add(rows[i : i + 97])
+        snap = b.finish(("sig",))
+        assert snap.faces == 1000 and snap.vectors.dtype == np.float16 and snap.signature == ("sig",)
+        assert np.array_equal(snap.vectors, whole.vectors) and np.array_equal(snap.person_idx, whole.person_idx)
+        assert snap.person_ids == whole.person_ids and np.allclose(snap.centroids, whole.centroids, atol=1e-6)
+    # a too-high estimate is trimmed (a copy only when many rows are spare)
+    b = Builder(100_000)
+    b.add(rows[:10])
+    snap = b.finish()
+    assert snap.faces == 10 and (snap.vectors.base is None or snap.vectors.base.shape[0] < 100_000)
+
+
+def test_per_person_cap_fits_total():
+    counts = [500, 200, 40, 3, 1]
+    assert per_person_cap(counts, 100, 0) == 100  # no total cap
+    assert per_person_cap(counts, 100, 10_000) == 100  # fits
+    cap = per_person_cap(counts, 100, 150)
+    assert sum(min(c, cap) for c in counts) <= 150 < sum(min(c, cap + 1) for c in counts)
+    assert per_person_cap(counts, 100, 2) == 1  # never 0
+
+
+class StreamDB(SigDB):
+    def __init__(self, counts):
+        super().__init__()
+        self.counts = counts
+        self.caps = []
+        rng = np.random.default_rng(5)
+        self.rows = {f"p{i}": [pg_binary(rng.normal(size=DIM)) for _ in range(c)] for i, c in enumerate(counts)}
+
+    async def named_face_counts(self):
+        return list(self.counts)
+
+    async def iter_named_faces(self, per_person, batch=2048):
+        self.loads += 1
+        self.caps.append(per_person)
+        flat = [(p, p.upper(), e) for p, embs in self.rows.items() for e in embs[:per_person]]
+        for i in range(0, len(flat), batch):
+            yield flat[i : i + batch]
+
+
+def test_refresh_streams_with_total_cap_and_metrics():
+    async def run():
+        db = StreamDB([50, 30, 5])
+        cache = FaceCache(db, per_person=40, refresh_seconds=60, knn=5, max_faces=40, batch=7)
+        assert await cache.refresh()
+        assert db.caps == [17] and cache.effective_per_person == 17  # 17 + 17 + 5 = 39 <= 40 < 18 + 18 + 5
+        assert cache.snap.faces == 39 and len(cache.snap.person_ids) == 3
+        assert m.FACE_CACHE_FACES._value.get() == cache.snap.faces
+        assert m.FACE_CACHE_PEOPLE._value.get() == 3
+        assert m.FACE_CACHE_BYTES._value.get() == cache.snap.nbytes > 0
+
+    asyncio.run(run())
+
+
+def test_lazy_cache_loads_on_use_and_unloads_when_idle():
+    async def run():
+        db = StreamDB([3, 2])
+        cache = FaceCache(db, per_person=10, refresh_seconds=60, knn=5, idle_seconds=1)
+        task = asyncio.create_task(cache.loop())
+        await asyncio.sleep(0.05)
+        assert not cache.ready and db.loads == 0  # lazy: nothing loaded at start
+        assert await cache.use() and cache.ready and db.loads == 1
+        cache.last_used -= 5  # idle for longer than idle_seconds
+        await asyncio.sleep(1.2)
+        assert not cache.ready and m.FACE_CACHE_FACES._value.get() == 0
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # an eager cache does not load in use()
+        eager = FaceCache(StreamDB([1]), per_person=10, refresh_seconds=60, knn=5)
+        assert not await eager.use()
+
+    asyncio.run(run())

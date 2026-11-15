@@ -15,11 +15,20 @@ sample of up to 100 faces of the same person nearly always contains one about as
 
 Refresh: a cheap signature (count of named faces and the newest change time of people and faces) is checked every
 ``refresh_seconds``; the cache is rebuilt only when it changed. If a refresh fails, the old cache keeps serving.
+
+Memory (bounded and predictable): the faces per person are counted first (no embeddings), the float16 matrix is
+allocated once at that size, and the embeddings are streamed in batches straight into it (a batch is normalised in
+float32 and dropped). While a rebuild runs the old snapshot keeps serving, so the peak is about two matrices
+(old + new, ~1 KiB per cached face each) plus one batch; the old one is released on the swap. ``max_faces`` caps
+the total: when the named people have more faces than that, the per-person cap is lowered until the total fits
+(every person keeps up to the same number of faces). ``idle_seconds`` > 0 makes the cache lazy (the admin UI):
+loaded on first use, dropped after that long without use.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import struct
 import time
@@ -27,6 +36,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import metrics as m
 from .matching import Neighbour
 
 log = logging.getLogger(__name__)
@@ -68,31 +78,92 @@ class Snapshot:
 
     @property
     def nbytes(self) -> int:
-        return int(self.vectors.nbytes + self.person_idx.nbytes)
+        c = self.centroids.nbytes if self.centroids is not None else 0
+        return int(self.vectors.nbytes + self.person_idx.nbytes + c)
+
+
+class Builder:
+    """Builds a Snapshot from batches of (person_id, name, embedding) rows without holding the rows: each batch is
+    decoded and normalised in float32, written into a float16 matrix allocated once for ``capacity`` faces, and
+    added to the per-person sums for the centroids. If more rows arrive than expected (faces named between the count
+    and the load), the matrix grows by a quarter."""
+
+    def __init__(self, capacity: int = 0, people: int = 0):
+        self.vectors = np.empty((max(capacity, 0), DIM), dtype=np.float16)
+        self.person_idx = np.empty(max(capacity, 0), dtype=np.int32)
+        self.sums = np.zeros((max(people, 0), DIM), dtype=np.float32)
+        self.ids: dict[str, int] = {}
+        self.names: list[str] = []
+        self.n = 0
+
+    def _grow(self, need: int) -> None:
+        cap = max(need, int(self.vectors.shape[0] * 1.25) + 1024)
+        vectors = np.empty((cap, DIM), dtype=np.float16)
+        vectors[: self.n] = self.vectors[: self.n]
+        person_idx = np.empty(cap, dtype=np.int32)
+        person_idx[: self.n] = self.person_idx[: self.n]
+        self.vectors, self.person_idx = vectors, person_idx
+
+    def add(self, rows) -> None:
+        if not rows:
+            return
+        b = len(rows)
+        if self.n + b > self.vectors.shape[0]:
+            self._grow(self.n + b)
+        block = np.empty((b, DIM), dtype=np.float32)
+        idx = np.empty(b, dtype=np.int32)
+        for i, (pid, name, emb) in enumerate(rows):
+            j = self.ids.get(pid)
+            if j is None:
+                j = self.ids[pid] = len(self.names)
+                self.names.append(name or "")
+            idx[i] = j
+            block[i] = vector_from_pg(emb)
+        block = _normalise(block)
+        if len(self.names) > self.sums.shape[0]:
+            sums = np.zeros((max(len(self.names), int(self.sums.shape[0] * 1.25) + 64), DIM), dtype=np.float32)
+            sums[: self.sums.shape[0]] = self.sums
+            self.sums = sums
+        np.add.at(self.sums, idx, block)
+        self.vectors[self.n : self.n + b] = block
+        self.person_idx[self.n : self.n + b] = idx
+        self.n += b
+
+    def finish(self, signature: tuple = ()) -> Snapshot:
+        n, people = self.n, len(self.names)
+        # spare rows (estimate a little high): keep a view when few, so the trim never needs a second matrix
+        spare = self.vectors.shape[0] - n
+        vectors = self.vectors[:n] if spare <= max(1024, n // 50) else self.vectors[:n].copy()
+        person_idx = self.person_idx[:n].copy()
+        centroids = _normalise(self.sums[:people]) if people else np.empty((0, DIM), dtype=np.float32)
+        self.vectors = self.person_idx = self.sums = None  # type: ignore[assignment]
+        return Snapshot(vectors, person_idx, list(self.ids), self.names, signature, time.time(), centroids, self.ids)
 
 
 def build(rows: list[tuple[str, str, object]], signature: tuple = ()) -> Snapshot:
     """rows: (person_id, name, embedding) -> Snapshot."""
-    ids: dict[str, int] = {}
-    names: list[str] = []
-    person_idx = np.empty(len(rows), dtype=np.int32)
-    vectors = np.empty((len(rows), DIM), dtype=np.float32)
-    for i, (pid, name, emb) in enumerate(rows):
-        if pid not in ids:
-            ids[pid] = len(names)
-            names.append(name or "")
-        person_idx[i] = ids[pid]
-        vectors[i] = vector_from_pg(emb)
-    if len(rows):
-        vectors = _normalise(vectors)
-        sums = np.zeros((len(names), DIM), dtype=np.float32)
-        np.add.at(sums, person_idx, vectors)
-        centroids = _normalise(sums)
-        vectors = vectors.astype(np.float16)
-    else:
-        vectors = np.empty((0, DIM), dtype=np.float16)
-        centroids = np.empty((0, DIM), dtype=np.float32)
-    return Snapshot(vectors, person_idx, list(ids), names, signature, time.time(), centroids, dict(ids))
+    b = Builder(len(rows))
+    b.add(rows)
+    return b.finish(signature)
+
+
+def per_person_cap(counts: list[int], per_person: int, max_faces: int) -> int:
+    """The largest per-person cap <= per_person for which the cached faces (sum of min(count, cap)) fit max_faces
+    (0 = no total cap). At least 1."""
+
+    def total(cap: int) -> int:
+        return sum(min(c, cap) for c in counts)
+
+    if max_faces <= 0 or total(per_person) <= max_faces:
+        return per_person
+    lo, hi = 1, per_person
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if total(mid) <= max_faces:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
 
 
 def same_person_rule(snap: Snapshot | None, max_distance: float):
@@ -115,7 +186,7 @@ def same_person_rule(snap: Snapshot | None, max_distance: float):
     return same
 
 
-def search(snap: Snapshot, queries: list[str], k: int, chunk: int = 65536) -> list[list[Neighbour]]:
+def search(snap: Snapshot, queries: list[str], k: int, chunk: int = 16384) -> list[list[Neighbour]]:
     """For each query embedding (ML's JSON text), the k nearest cached faces as Neighbours (cosine distance)."""
     if not queries:
         return []
@@ -177,17 +248,50 @@ def person_distances(snap: Snapshot, queries: list[str], person_ids: list[str]) 
 class FaceCache:
     """Holds the current Snapshot; ``refresh`` rebuilds it from the database when the signature changed."""
 
-    def __init__(self, db, per_person: int, refresh_seconds: int, knn: int):
+    def __init__(
+        self,
+        db,
+        per_person: int,
+        refresh_seconds: int,
+        knn: int,
+        max_faces: int = 0,
+        idle_seconds: int = 0,
+        batch: int = 2048,
+    ):
         self.db = db
         self.per_person = per_person
         self.refresh_seconds = refresh_seconds
         self.knn = knn
+        self.max_faces = max_faces
+        self.idle_seconds = idle_seconds  # > 0: lazy (load on first use, drop when idle)
+        self.batch = batch
         self.snap: Snapshot | None = None
+        self.last_used = 0.0
+        self.effective_per_person = per_person
         self._lock = asyncio.Lock()
 
     @property
     def ready(self) -> bool:
         return self.snap is not None
+
+    @property
+    def lazy(self) -> bool:
+        return self.idle_seconds > 0
+
+    async def _load(self, sig: tuple) -> Snapshot:
+        counts = await self.db.named_face_counts()
+        cap = per_person_cap(counts, self.per_person, self.max_faces)
+        if cap < self.per_person:
+            log.warning(
+                "face cache capped",
+                extra={"fields": {"max_faces": self.max_faces, "per_person": cap, "people": len(counts)}},
+            )
+        builder = Builder(sum(min(c, cap) for c in counts), len(counts))
+        async with contextlib.aclosing(self.db.iter_named_faces(cap, self.batch)) as batches:
+            async for rows in batches:  # one batch of rows in memory at a time
+                await asyncio.to_thread(builder.add, rows)
+        self.effective_per_person = cap
+        return builder.finish(sig)
 
     async def refresh(self, force: bool = False) -> bool:
         async with self._lock:
@@ -195,29 +299,57 @@ class FaceCache:
             if not force and self.snap is not None and sig == self.snap.signature:
                 return False
             t0 = time.perf_counter()
-            rows = await self.db.named_faces(self.per_person)
-            snap = await asyncio.to_thread(build, rows, sig)
-            self.snap = snap
+            try:
+                snap = await self._load(sig)
+            except Exception:
+                m.FACE_CACHE_REFRESH_ERRORS.inc()
+                raise
+            self.snap = snap  # swap; the old snapshot is released once running searches finish with it
+            seconds = time.perf_counter() - t0
+            _observe(snap, seconds, self.effective_per_person)
             log.info(
                 "face cache loaded",
                 extra={
                     "fields": {
                         "faces": snap.faces,
                         "people": len(snap.person_ids),
+                        "per_person": self.effective_per_person,
                         "mib": round(snap.nbytes / 2**20, 1),
-                        "seconds": round(time.perf_counter() - t0, 2),
+                        "seconds": round(seconds, 2),
                     }
                 },
             )
             return True
 
-    async def loop(self) -> None:
-        while True:
+    def unload(self) -> None:
+        if self.snap is not None:
+            self.snap = None
+            _observe(None, None, self.effective_per_person)
+            log.info("face cache unloaded (idle)", extra={"fields": {"idle_seconds": self.idle_seconds}})
+
+    async def use(self) -> bool:
+        """Mark the cache used; a lazy cache that is not loaded loads now. True when a snapshot is ready."""
+        self.last_used = time.monotonic()
+        if self.snap is None and self.lazy:
             try:
                 await self.refresh()
-            except Exception as exc:  # noqa: BLE001 - keep serving the old snapshot
-                log.warning("face cache refresh failed", extra={"fields": {"error": type(exc).__name__}})
-            await asyncio.sleep(self.refresh_seconds if self.snap is not None else 15)
+            except Exception as exc:  # noqa: BLE001 - the caller falls back to the database search
+                log.warning("face cache load failed", extra={"fields": {"error": type(exc).__name__}})
+        return self.snap is not None
+
+    async def loop(self) -> None:
+        while True:
+            if self.lazy and self.snap is not None and time.monotonic() - self.last_used > self.idle_seconds:
+                self.unload()
+            if not self.lazy or self.snap is not None:
+                try:
+                    await self.refresh()
+                except Exception as exc:  # noqa: BLE001 - keep serving the old snapshot
+                    log.warning("face cache refresh failed", extra={"fields": {"error": type(exc).__name__}})
+            if self.lazy:
+                await asyncio.sleep(min(self.refresh_seconds, self.idle_seconds))
+            else:
+                await asyncio.sleep(self.refresh_seconds if self.snap is not None else 15)
 
     async def nearest(self, queries: list[str]) -> list[list[Neighbour]]:
         snap = self.snap
@@ -230,6 +362,17 @@ class FaceCache:
         if snap is None:
             raise CacheNotReady()
         return await asyncio.to_thread(person_distances, snap, queries, person_ids)
+
+
+def _observe(snap: Snapshot | None, seconds: float | None, per_person: int) -> None:
+    m.FACE_CACHE_FACES.set(snap.faces if snap else 0)
+    m.FACE_CACHE_PEOPLE.set(len(snap.person_ids) if snap else 0)
+    m.FACE_CACHE_BYTES.set(snap.nbytes if snap else 0)
+    m.FACE_CACHE_PER_PERSON.set(per_person)
+    if snap is not None:
+        m.FACE_CACHE_LOADED.set(snap.loaded_at)
+    if seconds is not None:
+        m.FACE_CACHE_REFRESH.observe(seconds)
 
 
 class CacheNotReady(RuntimeError):

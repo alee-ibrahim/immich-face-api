@@ -113,6 +113,20 @@ SELECT person_id, name, embedding FROM (
 """
 )
 
+# faces with an embedding per named, not hidden person (no embeddings read): sizes the face cache before loading it
+_NAMED_FACE_COUNTS_SQL = (
+    """
+SELECT count(*)
+FROM person p
+JOIN asset_face af ON af."personGroupId" = p."personGroupId" AND af."ownerId" = p."ownerId"
+JOIN face_search fs ON fs."faceId" = af.id
+WHERE p."ownerId" = %(owner)s AND p.name <> '' AND NOT p."isHidden" AND"""
+    + _FACE_FILTER
+    + """
+GROUP BY p."personGroupId"
+"""
+)
+
 # nearest faces of the whole library through Immich's vector index (ORDER BY ... LIMIT on the bare column), then
 # filtered to the owner's people; grouped by person, best distance first
 _SIMILAR_SQL = (
@@ -269,15 +283,32 @@ class Database:
                 await cur.execute(_SIGNATURE_SQL, {"owner": self.status.owner_id})
                 return tuple(await cur.fetchone())
 
-    async def named_faces(self, per_person: int) -> list[tuple]:
-        """(person_id, name, embedding bytes) for up to per_person faces of each named, not hidden person, chosen by a
-        stable pseudo-random order of the face id. Binary transfer (pgvector send format), longer statement timeout."""
+    async def named_face_counts(self) -> list[int]:
+        """Faces (with an embedding) of each named, not hidden person; one small row per person, no embeddings."""
         async with self.pool.connection() as conn:
             async with conn.transaction():
                 await conn.execute("SET LOCAL statement_timeout = '180s'")
-                async with conn.cursor(binary=True) as cur:
+                async with conn.cursor() as cur:
+                    await cur.execute(_NAMED_FACE_COUNTS_SQL, {"owner": self.status.owner_id})
+                    return [int(n) for (n,) in await cur.fetchall()]
+
+    async def iter_named_faces(self, per_person: int, batch: int = 2048):
+        """Batches of (person_id, name, embedding bytes) for up to per_person faces of each named, not hidden person,
+        chosen by a stable pseudo-random order of the face id. Streamed through a server-side cursor so only one
+        batch of rows is in memory at a time (the face cache writes each batch into its matrix and drops it).
+        Binary transfer (pgvector send format), longer statement timeout."""
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                await conn.execute("SET LOCAL statement_timeout = '180s'")
+                async with conn.cursor(name="face_cache", binary=True) as cur:
+                    cur.itersize = batch
                     await cur.execute(_NAMED_FACES_SQL, {"owner": self.status.owner_id, "cap": per_person})
-                    return await cur.fetchall()
+                    while rows := await cur.fetchmany(batch):
+                        yield rows
+
+    async def named_faces(self, per_person: int) -> list[tuple]:
+        """All rows of iter_named_faces in one list (tests and tools; the face cache streams instead)."""
+        return [row async for rows in self.iter_named_faces(per_person) for row in rows]
 
     async def people(self) -> list[dict]:
         async with self.pool.connection() as conn:

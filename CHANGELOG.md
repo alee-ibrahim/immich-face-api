@@ -5,6 +5,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed (face cache memory)
+- The face cache rebuild no longer holds every fetched row plus float32 copies (~8 KiB per cached face, OOM kills at
+  ~110k cached faces in 1 GiB). Faces are counted per person first, the float16 matrix is allocated once, and
+  embeddings are streamed through a server-side cursor in batches of 2,048 straight into it; the old snapshot keeps
+  serving until the swap. Peak ≈ 2 × 1 KiB per cached face plus one batch.
+- Search converts the cache to float32 in chunks of 16,384 faces (was 65,536: 128 MiB per concurrent request).
+
+### Added (face cache)
+- `FACE_API_FACE_CACHE_MAX_FACES` (default 1,000,000): total cap; above it the per-person cap is lowered to fit.
+- Lazy cache: `FACE_API_FACE_CACHE_IDLE_SECONDS` (API, default 0 = always loaded) and
+  `FACE_API_ADMIN_FACE_CACHE_IDLE_SECONDS` (admin, default 1800): load on first use, drop when idle. The admin UI no
+  longer holds a full cache all the time.
+- Metrics: `face_api_face_cache_{faces,people,bytes,per_person,loaded_timestamp_seconds}`,
+  `face_api_face_cache_refresh_seconds`, `face_api_face_cache_refresh_errors_total`.
+
 ### Added (labeler: roster source)
 - Web source `"kind": "roster"`: people (name, portrait URL, other-language names, details such as position and
   organisation) from a JSON roster file, a local path or an http(s) URL, typically written by a separate scraper.

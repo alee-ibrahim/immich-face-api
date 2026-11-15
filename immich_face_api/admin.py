@@ -198,6 +198,9 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.face = State(settings)
+    if app.state.face.faces is not None:
+        # the admin needs the face cache only for "Try it": load it on first use, drop it when idle
+        app.state.face.faces.idle_seconds = settings.admin_face_cache_idle_seconds
     app.add_middleware(
         SessionMiddleware,
         secret_key=session_secret,
