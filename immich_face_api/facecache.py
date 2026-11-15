@@ -88,8 +88,9 @@ class Builder:
     added to the per-person sums for the centroids. If more rows arrive than expected (faces named between the count
     and the load), the matrix grows by a quarter."""
 
-    def __init__(self, capacity: int = 0, people: int = 0):
-        self.vectors = np.empty((max(capacity, 0), DIM), dtype=np.float16)
+    def __init__(self, capacity: int = 0, people: int = 0, dtype=np.float16):
+        self.dtype = np.dtype(dtype)
+        self.vectors = np.empty((max(capacity, 0), DIM), dtype=self.dtype)
         self.person_idx = np.empty(max(capacity, 0), dtype=np.int32)
         self.sums = np.zeros((max(people, 0), DIM), dtype=np.float32)
         self.ids: dict[str, int] = {}
@@ -98,7 +99,7 @@ class Builder:
 
     def _grow(self, need: int) -> None:
         cap = max(need, int(self.vectors.shape[0] * 1.25) + 1024)
-        vectors = np.empty((cap, DIM), dtype=np.float16)
+        vectors = np.empty((cap, DIM), dtype=self.dtype)
         vectors[: self.n] = self.vectors[: self.n]
         person_idx = np.empty(cap, dtype=np.int32)
         person_idx[: self.n] = self.person_idx[: self.n]
@@ -110,16 +111,14 @@ class Builder:
         b = len(rows)
         if self.n + b > self.vectors.shape[0]:
             self._grow(self.n + b)
-        block = np.empty((b, DIM), dtype=np.float32)
         idx = np.empty(b, dtype=np.int32)
-        for i, (pid, name, emb) in enumerate(rows):
+        for i, (pid, name, _emb) in enumerate(rows):
             j = self.ids.get(pid)
             if j is None:
                 j = self.ids[pid] = len(self.names)
                 self.names.append(name or "")
             idx[i] = j
-            block[i] = vector_from_pg(emb)
-        block = _normalise(block)
+        block = _normalise(_decode_block(rows))
         if len(self.names) > self.sums.shape[0]:
             sums = np.zeros((max(len(self.names), int(self.sums.shape[0] * 1.25) + 64), DIM), dtype=np.float32)
             sums[: self.sums.shape[0]] = self.sums
@@ -140,9 +139,27 @@ class Builder:
         return Snapshot(vectors, person_idx, list(self.ids), self.names, signature, time.time(), centroids, self.ids)
 
 
-def build(rows: list[tuple[str, str, object]], signature: tuple = ()) -> Snapshot:
+_BINARY_LEN = 4 + DIM * 4  # pgvector binary send format: int16 dim, int16 unused, DIM x float4 big-endian
+
+
+def _decode_block(rows) -> np.ndarray:
+    """The embeddings of a batch as (b, DIM) float32: binary pgvector values decoded in one numpy call (no Python
+    work per row, so a rebuild hardly holds the GIL); anything else row by row."""
+    embs = [r[2] for r in rows]
+    if all(isinstance(e, (bytes, bytearray, memoryview)) and len(e) == _BINARY_LEN for e in embs):
+        raw = np.frombuffer(b"".join(bytes(e) for e in embs), dtype=np.uint8).reshape(len(embs), _BINARY_LEN)
+        dims = raw[:, :2].copy().view(">u2").ravel()
+        if (dims == DIM).all():
+            return raw[:, 4:].copy().view(">f4").astype(np.float32)
+    block = np.empty((len(embs), DIM), dtype=np.float32)
+    for i, e in enumerate(embs):
+        block[i] = vector_from_pg(e)
+    return block
+
+
+def build(rows: list[tuple[str, str, object]], signature: tuple = (), dtype=np.float16) -> Snapshot:
     """rows: (person_id, name, embedding) -> Snapshot."""
-    b = Builder(len(rows))
+    b = Builder(len(rows), dtype=dtype)
     b.add(rows)
     return b.finish(signature)
 
@@ -198,7 +215,9 @@ def search(snap: Snapshot, queries: list[str], k: int, chunk: int = 16384) -> li
     best_d = np.full((len(queries), 0), np.inf, dtype=np.float32)
     best_i = np.empty((len(queries), 0), dtype=np.int64)
     for start in range(0, snap.faces, chunk):
-        block = snap.vectors[start : start + chunk].astype(np.float32)
+        block = snap.vectors[start : start + chunk]
+        if block.dtype != np.float32:
+            block = block.astype(np.float32)
         d = 1.0 - q @ block.T  # (m, c) cosine distance
         kk = min(k, d.shape[1])
         part = np.argpartition(d, kk - 1, axis=1)[:, :kk]
@@ -257,6 +276,8 @@ class FaceCache:
         max_faces: int = 0,
         idle_seconds: int = 0,
         batch: int = 2048,
+        faces_refresh_seconds: int = 0,
+        dtype: str = "float16",
     ):
         self.db = db
         self.per_person = per_person
@@ -265,6 +286,8 @@ class FaceCache:
         self.max_faces = max_faces
         self.idle_seconds = idle_seconds  # > 0: lazy (load on first use, drop when idle)
         self.batch = batch
+        self.faces_refresh_seconds = faces_refresh_seconds  # face-only changes rebuild at most this often (0 = always)
+        self.dtype = np.dtype(dtype)
         self.snap: Snapshot | None = None
         self.last_used = 0.0
         self.effective_per_person = per_person
@@ -286,7 +309,7 @@ class FaceCache:
                 "face cache capped",
                 extra={"fields": {"max_faces": self.max_faces, "per_person": cap, "people": len(counts)}},
             )
-        builder = Builder(sum(min(c, cap) for c in counts), len(counts))
+        builder = Builder(sum(min(c, cap) for c in counts), len(counts), self.dtype)
         async with contextlib.aclosing(self.db.iter_named_faces(cap, self.batch)) as batches:
             async for rows in batches:  # one batch of rows in memory at a time
                 await asyncio.to_thread(builder.add, rows)
@@ -297,6 +320,8 @@ class FaceCache:
         async with self._lock:
             sig = await self.db.named_signature()
             if not force and self.snap is not None and sig == self.snap.signature:
+                return False
+            if not force and self.snap is not None and self._faces_only(sig):
                 return False
             t0 = time.perf_counter()
             try:
@@ -320,6 +345,14 @@ class FaceCache:
                 },
             )
             return True
+
+    def _faces_only(self, sig: tuple) -> bool:
+        """True when only faces changed (same newest person change; e.g. Immich assigning more faces to named
+        people) and the last rebuild is younger than faces_refresh_seconds: wait, the snapshot is still good."""
+        old = self.snap.signature if self.snap is not None else ()
+        if self.faces_refresh_seconds <= 0 or len(sig) < 2 or len(old) < 2 or sig[1] != old[1]:
+            return False
+        return time.time() - self.snap.loaded_at < self.faces_refresh_seconds
 
     def unload(self) -> None:
         if self.snap is not None:

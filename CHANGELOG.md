@@ -5,6 +5,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed (cold start and latency)
+- `/readyz` waits for the face cache: no traffic until the first load is done, so rolling updates no longer send
+  requests to cold pods. Until then identify/verify answer `503 busy` (`Retry-After: 10`) at once instead of running the
+  exact SQL search (which hit the 15 s statement timeout on a busy database). Old behaviour:
+  `FACE_API_FACE_CACHE_SQL_FALLBACK=true`.
+- `FACE_API_FACE_CACHE_DTYPE=float32` (opt-in): no float16 conversion per search (measured in a pod: ~250 ms per
+  request at 118k cached faces -> ~10 ms), at 2 KiB per cached face.
+- `FACE_API_FACE_CACHE_FACES_REFRESH_SECONDS` (900): face-only changes rebuild at most every 15 min; new or renamed
+  people still within `FACE_API_FACE_CACHE_REFRESH_SECONDS`. Less database load while Immich is recognising.
+- Rebuild decodes a batch of binary embeddings in one numpy call (no Python work per vector).
+- Images go to the ML server as PNG with compress_level 0 (still lossless; ~2.5x faster to encode).
+
 ### Added (labeler: look-alike guard for the named-neighbour vote)
 - A vote is held when its faces are not clearly closer to the voted name than to another named person (median
   per-face gap < `vote_min_name_gap`, default 0.05), or < `vote_lookalike_min_gap` (0.10) when the voted name has a

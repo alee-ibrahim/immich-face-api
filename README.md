@@ -135,6 +135,9 @@ over the plain variable.
 | `FACE_API_FACE_CACHE_PER_PERSON` | `100` | faces cached per person |
 | `FACE_API_FACE_CACHE_REFRESH_SECONDS` | `300` | how often to check named faces for changes |
 | `FACE_API_FACE_CACHE_MAX_FACES` | `1000000` | total cap (~1 GiB); above it the per-person cap is lowered; `0` = none |
+| `FACE_API_FACE_CACHE_FACES_REFRESH_SECONDS` | `900` | when only faces changed (no person named/renamed), rebuild at most this often; `0` = every check |
+| `FACE_API_FACE_CACHE_DTYPE` | `float16` | `float32`: 2 KiB per face, but no conversion per search (~250 ms less per request at 118k faces on CPUs without F16C) |
+| `FACE_API_FACE_CACHE_SQL_FALLBACK` | `false` | until the cache is loaded: `false` = `/readyz` 503 and identify/verify `503 busy` at once; `true` = exact SQL search (slow) |
 | `FACE_API_FACE_CACHE_IDLE_SECONDS` | `0` | API: `0` = always loaded; > 0 = load on first use, drop after this idle time |
 | `FACE_API_ADMIN_FACE_CACHE_IDLE_SECONDS` | `1800` | admin UI ("Try it"): same, lazy by default; `0` = always loaded |
 | `FACE_API_MAX_CANDIDATES` | `5` | cap for `?candidates=` |
@@ -635,8 +638,15 @@ float16 matrix and searches it with one matrix product (numpy):
 - **Trade-off:** "nearest face wins" is kept, over the cached faces. For people with more faces than the cap, the
   nearest face can be one outside the sample. A sample of up to 100 faces of the same person almost always holds one
   about as close.
-- **Fallback:** until the first load finishes, and in test mode, the exact SQL search is used. Database timeouts become
-  `503 busy` with `Retry-After`. `FACE_API_FACE_CACHE=false` always uses SQL (small libraries only).
+- **Cold start:** `/readyz` answers 503 until the first load has finished, so a rolling update keeps the old pods
+  serving until the new ones are warm (use `/readyz` as the readiness probe, `maxUnavailable: 0`). A request that still
+  arrives meanwhile gets `503 busy` with `Retry-After: 10` at once. The exact SQL search over every named face is only
+  used with `FACE_API_FACE_CACHE_SQL_FALLBACK=true`, in test mode, or with `FACE_API_FACE_CACHE=false` (small
+  libraries only): with millions of named faces it can exceed the statement timeout.
+- **Rebuild frequency:** a new or renamed person is picked up within `FACE_API_FACE_CACHE_REFRESH_SECONDS`; when only
+  faces changed (Immich assigning more faces to people that are already named, all the time while it recognises a
+  large library) the rebuild waits until the snapshot is `FACE_API_FACE_CACHE_FACES_REFRESH_SECONDS` (900) old.
+  Merges and deletions that do not touch a remaining person's change time count as face-only changes.
 
 **Thresholds.** `distance` is the same measure Immich uses for clustering. 0.5 matches Immich's default; a lower value
 (0.4–0.45) gives fewer but safer suggestions, which is usually right when a wrong public name is worse than none.
