@@ -1040,6 +1040,10 @@ More source kinds:
   `vote_lookalike_min_gap` (0.10) when the voted name has a known look-alike (another person's name whose faces'
   centroid is within `vote_lookalike_distance`, 0.40). Names count as the same person only when they share a key or
   are compatible spellings with at least two name words each. Set the values to 0 to switch a check off.
+  Cost of the vote: exact nearest-face search, about
+  (unnamed sampled faces x named sampled faces x 512) x 2 floating-point operations in batched matrix products, so it
+  grows with both and uses as many cores as the BLAS library is given (`OPENBLAS_NUM_THREADS`; set it to the CPU
+  limit). Every `run` stores the time of each step in its stats (`phase_seconds`) and logs it.
 
 **Which sources may be written** (`write_sources`, e.g. `["folder", "named", "members-2024"]`): a proposal is written
 only if the approved sources alone lead to the same name; anything else is held with "based on sources not yet

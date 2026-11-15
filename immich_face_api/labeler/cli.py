@@ -19,6 +19,7 @@ import logging
 import sys
 import time
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -112,15 +113,18 @@ def _write_names(ctx: Context, run_id: str, source_run: str | None, owner: str, 
     return c
 
 
-def add_named_votes(ctx, owner, clusters, props, t, write_sources):
+def add_named_votes(ctx, owner, clusters, props, t, write_sources, timings=None):
     """Named-neighbour vote for the unnamed clusters; merged with the reference proposals: same name = more
     evidence, different name = both held, no reference proposal = a new proposal (source "named")."""
     named = [c for c in clusters if c.name and not c.hidden and not c.name.startswith("(")]
     unnamed = [c for c in clusters if not c.name and not c.hidden and c.faces >= t.min_cluster_faces]
     names = {c.person_id: c.name for c in named}
-    nsamp = ctx.db.samples(owner, [c.person_id for c in named], t.vote_named_sample) if named else {}
-    usamp = ctx.db.samples(owner, [c.person_id for c in unnamed], t.vote_unnamed_sample) if unnamed else {}
-    votes = named_vote(usamp, nsamp, names, {c.person_id: c.faces for c in clusters}, t)
+    timings = {} if timings is None else timings
+    with phase(timings, "vote_samples"):
+        nsamp = ctx.db.samples(owner, [c.person_id for c in named], t.vote_named_sample) if named else {}
+        usamp = ctx.db.samples(owner, [c.person_id for c in unnamed], t.vote_unnamed_sample) if unnamed else {}
+    with phase(timings, "vote"):
+        votes = named_vote(usamp, nsamp, names, {c.person_id: c.faces for c in clusters}, t)
     by = {p.person_id: p for p in props}
     st = Counter(votes=len(votes))
     allowed = None if write_sources is None else set(write_sources)
@@ -163,6 +167,18 @@ def hold_unapproved_sources(props, refs, write_sources, clusters, t, samples, ov
     return n
 
 
+@contextmanager
+def phase(timings: dict, name: str):
+    """Time one step of a run into ``timings`` (stats "phase_seconds") and log it, so slow steps show in the logs."""
+    log.info("phase %s ...", name)
+    t0 = time.monotonic()
+    try:
+        yield
+    finally:
+        timings[name] = round(time.monotonic() - t0, 1)
+        log.info("phase %s: %.1f s", name, timings[name])
+
+
 def apply_bands_of(args) -> list[str]:
     """Bands `run` writes: only those given with --apply-band (none = dry run)."""
     return [b for b in (args.apply_band or []) if b in BANDS]
@@ -176,14 +192,17 @@ def cmd_run(s: LabelerSettings, args) -> int:
     apply_bands = apply_bands_of(args)
     stats: dict = {"run_id": run_id, "mode": ("apply " + "+".join(apply_bands)) if apply_bands else "dry run"}
     notes: list[str] = []
+    timings: dict[str, float] = {}
+    stats["phase_seconds"] = timings
     try:
         owner = ctx.owner()
         stats["immich_version"] = ctx.db.check(need_paths=bool(s.sources.folders))
         t = s.sources.thresholds
 
         roots = sorted({r.root for r in s.sources.folders})
-        faces_by_root = {root: ctx.db.folder_faces(owner, root) for root in roots}
-        fres = folder_references(s.sources, faces_by_root)
+        with phase(timings, "folders"):
+            faces_by_root = {root: ctx.db.folder_faces(owner, root) for root in roots}
+            fres = folder_references(s.sources, faces_by_root)
         stats["folder_faces"] = sum(len(v) for v in faces_by_root.values())
         stats["name_folders_with_faces"] = fres.folders
         stats["folder_references"] = len(fres.refs)
@@ -202,6 +221,7 @@ def cmd_run(s: LabelerSettings, args) -> int:
         portraits: dict[str, bytes] = {}
         wrefs = []
         if s.sources.web:
+            t_web = time.monotonic()
             fetcher = Fetcher(
                 ctx.store,
                 s.sources.user_agent,
@@ -224,8 +244,10 @@ def cmd_run(s: LabelerSettings, args) -> int:
             finally:
                 fetcher.close()
                 emb.close()
+                timings["web"] = round(time.monotonic() - t_web, 1)
 
-        clusters = ctx.db.clusters(owner)
+        with phase(timings, "clusters"):
+            clusters = ctx.db.clusters(owner)
         unnamed = [c for c in clusters if not c.name and not c.hidden]
         stats["clusters"] = len(clusters)
         stats["clusters_unnamed"] = len(unnamed)
@@ -240,25 +262,28 @@ def cmd_run(s: LabelerSettings, args) -> int:
         if unnamed and identities:
             dmin = (1.0 - np.stack([c.centroid for c in unnamed]) @ np.stack([i.centroid for i in identities]).T).min(1)
             cand = [c.person_id for c, d in zip(unnamed, dmin, strict=True) if d <= t.match_max_distance]
-        samples = ctx.db.samples(owner, cand, t.cluster_sample_faces) if cand else {}
-        ov = overlap(fres.refs, fres.face_person)
-        props = propose(clusters, identities, t, samples, ov)
-        held_new = hold_unapproved_sources(
-            props, refs, s.sources.write_sources, clusters, t, samples, ov, s.sources.names.homonym_detail
-        )
+        with phase(timings, "references"):
+            samples = ctx.db.samples(owner, cand, t.cluster_sample_faces) if cand else {}
+            ov = overlap(fres.refs, fres.face_person)
+            props = propose(clusters, identities, t, samples, ov)
+            held_new = hold_unapproved_sources(
+                props, refs, s.sources.write_sources, clusters, t, samples, ov, s.sources.names.homonym_detail
+            )
         if s.sources.named_people:
-            props, vstats = add_named_votes(ctx, owner, clusters, props, t, s.sources.write_sources)
+            props, vstats = add_named_votes(ctx, owner, clusters, props, t, s.sources.write_sources, timings)
             stats.update(vstats)
             held_new += vstats["vote_held_unapproved"]
         stats["proposals_needing_source_approval"] = held_new
-        merges = merge_candidates(clusters, props, t)
+        with phase(timings, "merge_candidates"):
+            merges = merge_candidates(clusters, props, t)
         band_counts = Counter(p.band for p in props)
         for b in BANDS:
             stats[f"proposals_{b}"] = band_counts.get(b, 0)
         stats["merge_candidates"] = len(merges)
 
         ids = {p.person_id for p in props} | {m.a for m in merges} | {m.b for m in merges}
-        thumbs = {pid: ctx.api.thumbnail(pid) for pid in sorted(ids)[:5000]}
+        with phase(timings, "thumbnails"):
+            thumbs = {pid: ctx.api.thumbnail(pid) for pid in sorted(ids)[:5000]}
 
         ctx.store.save_proposals(
             run_id,
@@ -279,8 +304,9 @@ def cmd_run(s: LabelerSettings, args) -> int:
             ],
         )
         if apply_bands:
-            todo = ctx.store.proposals(run_id, apply_bands)
-            res = _write_names(ctx, run_id, run_id, owner, todo)
+            with phase(timings, "apply"):
+                todo = ctx.store.proposals(run_id, apply_bands)
+                res = _write_names(ctx, run_id, run_id, owner, todo)
             stats.update({f"apply_{k}": v for k, v in res.items()})
         stats["seconds"] = round(time.monotonic() - t0, 1)
         html = proposals_html(run_id, stats, props, merges, thumbs, portraits, s.sources.immich_web_url, notes)

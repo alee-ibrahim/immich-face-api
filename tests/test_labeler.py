@@ -495,6 +495,41 @@ def test_named_vote_finds_more_clusters_of_a_named_person():
     assert v.identity.refs[0].source == "named" and "named-neighbour vote" in v.evidence()[0]
 
 
+def test_nearest_named_is_the_brute_force_nearest_face_across_batches_and_tiles():
+    from immich_face_api.labeler.match import nearest_named
+
+    nmat = normalise(RNG.normal(size=(37, DIM))).astype(np.float32)
+    nmat[20] = nmat[5]  # a tie: the earlier named face wins, as one argmax over the whole matrix would
+    unnamed = [normalise(RNG.normal(size=(k, DIM))).astype(np.float32) for k in (1, 3, 7, 2, 9, 4)]
+    unnamed[2][0] = nmat[5]
+    for rows, cols in ((4, 5), (8, 64), (1, 1), (100, 100)):  # a cluster bigger than a batch still goes in one piece
+        dists, owners = nearest_named(unnamed, nmat, rows=rows, cols=cols)
+        for u, d, o in zip(unnamed, dists, owners, strict=True):
+            sim = u @ nmat.T
+            assert (o == sim.argmax(1)).all()
+            assert np.allclose(d, 1.0 - sim.max(1), atol=1e-6)
+        assert owners[2][0] == 5
+
+
+def test_named_vote_same_result_for_any_batch_size(monkeypatch):
+    from immich_face_api.labeler import match
+
+    people = [person() for _ in range(6)]
+    named = {f"N{i}": np.stack([face_of(p) for _ in range(4 + i)]) for i, p in enumerate(people[:4])}
+    names = {"N0": "Jane Doe", "N1": "John Roe", "N2": "Jane Doe", "N3": "Ali Hassan"}
+    unnamed = {f"U{i}": np.stack([face_of(people[i % 6]) for _ in range(1 + i % 5)]) for i in range(12)}
+    faces = {k: len(v) for k, v in unnamed.items()}
+
+    def key(votes):
+        return [(v.person_id, v.identity.name, v.band, v.distance, v.margin, v.vote) for v in votes]
+
+    want = key(match.named_vote(unnamed, named, names, faces, T))
+    assert want and {w[1] for w in want} >= {"Jane Doe", "John Roe", "Ali Hassan"}
+    real = match.nearest_named
+    monkeypatch.setattr(match, "nearest_named", lambda u, n: real(u, n, rows=3, cols=7))
+    assert key(match.named_vote(unnamed, named, names, faces, T)) == want
+
+
 def test_unapproved_sources_are_held():
     from immich_face_api.labeler.cli import hold_unapproved_sources
 

@@ -5,6 +5,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed (labeler: faster named-neighbour vote)
+- The vote finds each unnamed face's nearest named face in batched matrix products (4,096 faces x 16,384 named faces
+  per product) instead of one small product per cluster, which read the whole named-face matrix once per cluster and
+  was memory-bound. Same exact search, same proposals; only the stored distance can differ in the 4th decimal when
+  floating-point summation order differs. Measured on production data (82k clusters, 260k named / 887k unnamed sampled
+  faces, 4 CPU): 4,440 s -> 2,170 s, same votes, bands and look-alike holds. Uses `OPENBLAS_NUM_THREADS` cores.
+- `run` stats include `phase_seconds` (folders, web, clusters, references, vote_samples, vote, merge_candidates,
+  thumbnails, apply) and each step is logged with its duration.
+
 ### Changed (cold start and latency)
 - `/readyz` waits for the face cache: no traffic until the first load is done, so rolling updates no longer send
   requests to cold pods. Until then identify/verify answer `503 busy` (`Retry-After: 10`) at once instead of running the
