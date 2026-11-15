@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added (labeler: look-alike guard for the named-neighbour vote)
+- A vote is held when its faces are not clearly closer to the voted name than to another named person (median
+  per-face gap < `vote_min_name_gap`, default 0.05), or < `vote_lookalike_min_gap` (0.10) when the voted name has a
+  known look-alike (`vote_lookalike_distance`, 0.40, between name centroids). The hold names the runner-up. Found on
+  a real archive: a vote spread a member's name to a different person's clusters.
+- `LABELER_DB_STATEMENT_TIMEOUT` (seconds, default 1800; was fixed at 600): at ~71k clusters the centroid query
+  outgrew 10 minutes.
+
 ### Added (main subject)
 - **Main-subject scoring** in `POST /v1/identify`: per face `prominence` (0–1), `role` (`main`, `co_subject`,
   `background`) and the raw `subject_signals` (size, dominance, lead, sharpness and sharpness relative to the other faces

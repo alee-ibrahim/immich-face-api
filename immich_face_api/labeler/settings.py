@@ -68,6 +68,12 @@ class Thresholds:
     vote_max_median: float = 0.4
     vote_unnamed_sample: int = 50  # faces per unnamed cluster
     vote_named_sample: int = 300  # faces per named person
+    # look-alike guard (hold, never write): the vote's faces must be clearly closer to the voted name than to any
+    # OTHER named person (median per-face gap), and more clearly so when the voted name has a known look-alike (another
+    # name whose faces' centroid is within vote_lookalike_distance). 0 disables a check.
+    vote_min_name_gap: float = 0.05
+    vote_lookalike_distance: float = 0.40
+    vote_lookalike_min_gap: float = 0.10
 
 
 @dataclass
@@ -251,6 +257,7 @@ class LabelerSettings:
     max_copies: int = 20000  # cap of share-names copies per run
     keep_reports: int = 30  # older runs keep their proposals and audit, but not the report blob
     http_timeout: float = 60.0
+    db_statement_timeout: float = 1800.0  # seconds; the per-cluster centroid query grows with the library
     sources: SourcesConfig = field(default_factory=SourcesConfig)
 
     @classmethod
@@ -289,6 +296,7 @@ class LabelerSettings:
             max_copies=_num("MAX_COPIES", 20000, int),
             keep_reports=_num("KEEP_REPORTS", 30, int),
             http_timeout=_num("HTTP_TIMEOUT", 60.0),
+            db_statement_timeout=_num("DB_STATEMENT_TIMEOUT", 1800.0),
             sources=SourcesConfig.load(config_file) if config_file else SourcesConfig(),
         )
         if not 1 <= s.max_apply <= 100000:
