@@ -1098,3 +1098,35 @@ def test_recheck_flags_a_vote_named_cluster_the_anchors_do_not_support():
     assert by["H"]["eras"] == "2003-2003 / 2021-2021" and by["G"]["anchor_distance"] < T.vote_anchor_distance
     assert "Jane Doe" in recheck_html("r", {"suspects": 1}, rows[:1], {}, "")
     assert recheck_csv(rows, "").count("\n") == 3
+
+
+def test_only_a_voters_main_faces_vote():
+    """A correctly named cluster that also holds another person's faces (30 % foreign) must not pass its name on to
+    that other person's unnamed cluster."""
+    from immich_face_api.labeler.match import main_faces, named_vote
+
+    a, b = person(), person()
+    mixed = np.stack([face_of(a) for _ in range(14)] + [face_of(b) for _ in range(6)])
+    named = {"NA": mixed}
+    names = {"NA": "Jane Doe"}
+    unnamed = {"U": np.stack([face_of(b) for _ in range(6)])}
+    (v,) = named_vote(unnamed, named, names, {"U": 6}, T)  # every face votes: the foreign faces name U
+    assert v.identity.name == "Jane Doe"
+    m = main_faces(mixed, T.vote_voter_max_distance)
+    assert len(m) == 14 and all(any(np.allclose(r, x) for x in mixed[:14]) for r in m)
+    assert named_vote(unnamed, {"NA": m}, names, {"U": 6}, T) == []
+    assert len(main_faces(mixed, 0)) == 20  # 0 = old behaviour
+
+
+def test_add_named_votes_drops_foreign_voter_faces():
+    a, b = person(), person()
+    mixed = np.stack([face_of(a) for _ in range(14)] + [face_of(b) for _ in range(6)])
+    ua, ub = np.stack([face_of(a) for _ in range(6)]), np.stack([face_of(b) for _ in range(6)])
+    clusters = [
+        Cluster("NA", 20, normalise(mixed.mean(0)), "Jane Doe"),
+        Cluster("UA", 6, normalise(ua.mean(0)), ""),
+        Cluster("UB", 6, normalise(ub.mean(0)), ""),
+    ]
+    ctx = SimpleNamespace(store=_VoteStore({}), db=_VoteDB({"NA": mixed, "UA": ua, "UB": ub}))
+    props, st = cli.add_named_votes(ctx, "owner", clusters, [], T, None)
+    assert [p.person_id for p in props] == ["UA"] and st["vote_voter_faces_foreign_dropped"] == 6
