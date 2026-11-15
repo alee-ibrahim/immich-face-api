@@ -1025,6 +1025,11 @@ More source kinds:
   face (within `maxDistance`), as Immich itself assigns faces. Measured on one archive (leave one named cluster out):
   267 right, 1 wrong at a vote share >= 0.8; no wrong vote for people with a single cluster. A vote that agrees with a
   reference proposal is extra evidence; one that disagrees holds the proposal.
+  **Look-alike guard** (high and medium votes, the ones that could be written): the vote is held when its faces are not clearly closer to the voted name
+  than to any other named person (median per-face gap below `vote_min_name_gap`, 0.05), or below
+  `vote_lookalike_min_gap` (0.10) when the voted name has a known look-alike (another person's name whose faces'
+  centroid is within `vote_lookalike_distance`, 0.40). Names count as the same person only when they share a key or
+  are compatible spellings with at least two name words each. Set the values to 0 to switch a check off.
 
 **Which sources may be written** (`write_sources`, e.g. `["folder", "named", "members-2024"]`): a proposal is written
 only if the approved sources alone lead to the same name; anything else is held with "based on sources not yet
@@ -1095,6 +1100,7 @@ same identity. Listed in the report only; the labeler never merges.
 | `LABELER_CONFIG_FILE` | - | sources and thresholds (JSON) |
 | `LABELER_OUTPUT_DIR` | - | also write `report.html` + `proposals.csv` here |
 | `LABELER_MAX_APPLY` | 500 | names written per command at most |
+| `LABELER_DB_STATEMENT_TIMEOUT` | 1800 | seconds a single read query may take (the per-cluster centroid query grows with the library; was fixed at 600) |
 | `LABELER_KEEP_REPORTS` | 30 | report blobs kept (proposals and audit are kept) |
 
 ### Commands

@@ -117,7 +117,7 @@ class ImmichDB:
         self.conn = psycopg.connect(
             _conninfo(s, s.db_name, s.db_host, s.db_user, s.db_password, "immich-people-labeler"),
             autocommit=True,
-            options="-c default_transaction_read_only=on -c statement_timeout=600000",
+            options=f"-c default_transaction_read_only=on -c statement_timeout={int(s.db_statement_timeout * 1000)}",
         )
 
     def close(self) -> None:
