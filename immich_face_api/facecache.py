@@ -212,6 +212,9 @@ def search(snap: Snapshot, queries: list[str], k: int, chunk: int = 16384) -> li
     q = _normalise(np.stack([vector_from_pg(x) for x in queries]))  # (m, 512) float32
     if q.shape[1] != snap.vectors.shape[1]:
         raise ValueError(f"embedding size {q.shape[1]} != cached {snap.vectors.shape[1]} (different face model?)")
+    if snap.vectors.dtype == np.float32:
+        # no conversion copy: larger blocks (fewer argpartition/concatenate rounds), distances <= ~32 MiB per block
+        chunk = max(chunk, 8_000_000 // len(queries))
     best_d = np.full((len(queries), 0), np.inf, dtype=np.float32)
     best_i = np.empty((len(queries), 0), dtype=np.int64)
     for start in range(0, snap.faces, chunk):
