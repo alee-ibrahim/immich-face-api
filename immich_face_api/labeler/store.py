@@ -79,6 +79,34 @@ CREATE TABLE IF NOT EXISTS labeler_override (
   note text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+-- purity sweep: the plan of a report run (sub-identity centroids, so apply can place every current face) and the
+-- audit of every face it moved (the basis of purity-undo)
+CREATE TABLE IF NOT EXISTS labeler_purity_sub (
+  run_id text NOT NULL REFERENCES labeler_run(run_id) ON DELETE CASCADE,
+  person_id uuid NOT NULL,
+  sub int NOT NULL,
+  is_main boolean NOT NULL,
+  sampled int NOT NULL,
+  d_main real NOT NULL,
+  action text NOT NULL,
+  dest text NOT NULL DEFAULT '',
+  centroid real[] NOT NULL,
+  PRIMARY KEY (run_id, person_id, sub)
+);
+CREATE TABLE IF NOT EXISTS labeler_face_move (
+  id bigserial PRIMARY KEY,
+  run_id text NOT NULL,
+  source_run_id text NOT NULL,
+  face_id uuid NOT NULL,
+  from_person uuid NOT NULL,
+  to_person uuid NOT NULL,
+  sub int NOT NULL,
+  new_person boolean NOT NULL DEFAULT false,
+  applied_at timestamptz NOT NULL DEFAULT now(),
+  undone_at timestamptz,
+  undo_run_id text
+);
+CREATE INDEX IF NOT EXISTS labeler_face_move_run ON labeler_face_move (run_id);
 CREATE TABLE IF NOT EXISTS labeler_embedding_cache (
   image_sha256 text NOT NULL,
   settings text NOT NULL,
@@ -188,6 +216,53 @@ class Store:
             "ORDER BY started_at DESC LIMIT %s",
             (limit,),
         ).fetchall()
+
+    # --- purity sweep
+    def save_purity_plan(self, run_id: str, rows: list[tuple]) -> None:
+        """rows: (person_id, sub, is_main, sampled, d_main, action, dest, centroid list)."""
+        with self.conn.cursor() as cur:
+            cur.executemany(
+                """INSERT INTO labeler_purity_sub (run_id, person_id, sub, is_main, sampled, d_main, action, dest,
+                   centroid) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                [(run_id, *r) for r in rows],
+            )
+
+    def purity_plan(self, run_id: str, person_id: str) -> list[tuple]:
+        """(sub, is_main, action, dest, centroid) of one person in a report run."""
+        return self.conn.execute(
+            """SELECT sub, is_main, action, dest, centroid FROM labeler_purity_sub
+               WHERE run_id = %s AND person_id = %s ORDER BY sub""",
+            (run_id, person_id),
+        ).fetchall()
+
+    def purity_moved(self, run_id: str, person_id: str) -> int:
+        """Faces of a person already moved by earlier applies of the same report run (not undone)."""
+        row = self.conn.execute(
+            """SELECT count(*) FROM labeler_face_move WHERE source_run_id = %s AND from_person = %s
+               AND undone_at IS NULL""",
+            (run_id, person_id),
+        ).fetchone()
+        return int(row[0])
+
+    def audit_face_move(self, run_id: str, source_run: str, face_id: str, src: str, dst: str, sub: int, new: bool):
+        self.conn.execute(
+            """INSERT INTO labeler_face_move (run_id, source_run_id, face_id, from_person, to_person, sub, new_person)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (run_id, source_run, face_id, src, dst, sub, new),
+        )
+
+    def face_moves(self, run_id: str) -> list[tuple]:
+        """(id, face_id, from_person, to_person) of a purity-apply run, not undone yet."""
+        return self.conn.execute(
+            """SELECT id, face_id::text, from_person::text, to_person::text FROM labeler_face_move
+               WHERE run_id = %s AND undone_at IS NULL ORDER BY id""",
+            (run_id,),
+        ).fetchall()
+
+    def face_move_undone(self, move_id: int, undo_run: str) -> None:
+        self.conn.execute(
+            "UPDATE labeler_face_move SET undone_at = now(), undo_run_id = %s WHERE id = %s", (undo_run, move_id)
+        )
 
     # --- proposals
     def save_proposals(self, run_id: str, rows: list[dict]) -> None:

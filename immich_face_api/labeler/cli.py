@@ -41,6 +41,17 @@ from .match import (
     vote_review_holds,
 )
 from .names import compatible, tidy_name
+from .purity import (
+    PurityThresholds,
+    assign_to_subs,
+    crop_face,
+    order_plans,
+    plan_cluster,
+    plans_csv,
+    plans_html,
+    read_review,
+)
+from .purity import summary as purity_summary
 from .report import proposals_csv, proposals_html, recheck_csv, recheck_html, worklist_csv, worklist_html
 from .settings import ConfigError, LabelerSettings
 from .share_names import NameWriter, share_names, undo_copies
@@ -608,6 +619,203 @@ def _undo_copies(s: LabelerSettings, args) -> int:
         store.close()
 
 
+# --- purity sweep (see purity.py)
+def _purity_crops(api: ImmichAPI, plans, faces_by_person, per_sub: int, workers: int = 4) -> dict:
+    """Face crops for the report: up to ``per_sub`` per shown sub-identity (main + not kept). Without asset.view on the
+    key the previews are refused and the report has no pictures."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    jobs = []
+    for p in plans:
+        faces = faces_by_person.get(p.person_id, [])
+        for sub in p.subs:
+            if sub.action == "keep" and not sub.is_main:
+                continue
+            for i in sub.idx[:per_sub]:
+                jobs.append(((p.person_id, sub.label), faces[i]))
+
+    def one(job):
+        key, f = job
+        data = api.preview(f.asset_id)
+        return key, (crop_face(data, f.box) if data else None)
+
+    out: dict = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for key, crop in ex.map(one, jobs):
+            if crop:
+                out.setdefault(key, []).append(crop)
+    return out
+
+
+def cmd_purity(s: LabelerSettings, args) -> int:
+    """Read-only report: sub-identities of named clusters and of big unnamed ones, and what would move where."""
+    ctx = Context(s)
+    run_id = new_run_id()
+    ctx.store.start_run(run_id, "purity")
+    try:
+        owner = ctx.owner()
+        ctx.db.check(need_paths=False)
+        t = PurityThresholds(args.link, args.keep, args.foreign, args.match, args.min_new, args.sample)
+        clusters = [c for c in ctx.db.clusters(owner) if c.faces > 0]
+        ids = [c.person_id for c in clusters]
+        names = [c.name for c in clusters]
+        index = {pid: i for i, pid in enumerate(ids)}
+        cents = np.stack([c.centroid for c in clusters]).astype(np.float32) if clusters else np.zeros((0, 512))
+        if args.person:
+            want = set(args.person)
+            cand = [c for c in clusters if c.person_id in want]
+        else:
+            cand = [
+                c
+                for c in clusters
+                if not c.hidden
+                and ((c.name and c.faces >= args.named_min_faces) or (not c.name and c.faces >= args.unnamed_min_faces))
+            ]
+        log.info("purity %s: %d clusters, %d candidates", run_id, len(clusters), len(cand))
+        plans, meta = [], {}
+        for i in range(0, len(cand), args.batch):
+            batch = cand[i : i + args.batch]
+            smp = ctx.db.purity_samples(owner, [c.person_id for c in batch], t.sample)
+            for c in batch:
+                faces = smp.get(c.person_id, [])
+                if len(faces) < 2:
+                    continue
+                emb = np.stack([f.embedding for f in faces])
+                plans.append(plan_cluster(c.person_id, c.name, c.faces, emb, cents, ids, names, t, index[c.person_id]))
+                for f in faces:
+                    f.embedding = None  # keep only what the crops need
+                meta[c.person_id] = faces
+            log.info("purity %s: %d/%d clusters analysed", run_id, min(i + args.batch, len(cand)), len(cand))
+        shown = order_plans(plans, args.top)
+        stats = purity_summary(plans, shown)
+        ctx.store.save_purity_plan(
+            run_id,
+            [
+                (
+                    p.person_id,
+                    sub.label,
+                    sub.is_main,
+                    len(sub.idx),
+                    sub.d_main,
+                    sub.action,
+                    sub.dest,
+                    [float(x) for x in sub.centroid],
+                )
+                for p in shown
+                for sub in p.subs
+            ],
+        )
+        crops = _purity_crops(ctx.api, shown, meta, args.crops) if args.crops else {}
+        stats["crops"] = sum(len(v) for v in crops.values())
+        csv_text = plans_csv(run_id, shown)
+        html_text = plans_html(run_id, shown, crops, stats, t)
+        out = Path(args.out or s.output_dir or ".")
+        out.mkdir(parents=True, exist_ok=True)
+        (out / f"purity-{run_id}.csv").write_text(csv_text, encoding="utf-8")
+        (out / f"purity-{run_id}.html").write_text(html_text, encoding="utf-8")
+        small = len(html_text) < 8_000_000  # the database keeps the CSV always, the HTML only when small
+        ctx.store.finish_run(run_id, "ok", stats, html_text if small else None, csv_text)
+        log.info("purity %s: %s -> %s", run_id, json.dumps(stats), out)
+        return 0
+    except Exception as exc:
+        ctx.store.finish_run(run_id, "failed", {"error": f"{type(exc).__name__}: {exc}"})
+        raise
+    finally:
+        ctx.close()
+
+
+def cmd_purity_apply(s: LabelerSettings, args) -> int:
+    """Move the faces of APPROVED foreign sub-identities (review CSV, approve=yes). Dry run unless --apply."""
+    approved = read_review(Path(args.review).read_text(encoding="utf-8"))
+    ctx = Context(s)
+    run_id = new_run_id()
+    ctx.store.start_run(run_id, "purity-apply")
+    c: Counter = Counter()
+    try:
+        owner = ctx.owner()
+        ctx.db.check(need_paths=False)
+        for (src_run, pid), subs in sorted(approved.items()):
+            plan = ctx.store.purity_plan(src_run, pid)
+            if not plan:
+                c["no_plan"] += 1
+                continue
+            labels = [r[0] for r in plan]
+            if any(
+                lab not in labels or plan[labels.index(lab)][2] not in ("move_existing", "move_new") for lab in subs
+            ):
+                c["review_mismatch"] += 1
+                continue
+            if ctx.store.purity_moved(src_run, pid):
+                c["already_applied"] += 1
+                continue
+            fids, emb = ctx.db.person_faces(owner, pid)
+            if not fids:
+                c["person_empty"] += 1
+                continue
+            nearest, _ = assign_to_subs(emb, np.array([r[4] for r in plan], dtype=np.float32))
+            for lab in sorted(subs):
+                k = labels.index(lab)
+                action, dest = plan[k][2], plan[k][3]
+                faces = [f for f, n in zip(fids, nearest, strict=True) if n == k]
+                if not faces:
+                    c["sub_empty"] += 1
+                    continue
+                if c["faces_planned"] + len(faces) > args.max_faces:
+                    c["over_cap_subs"] += 1
+                    continue
+                c[f"{action}_subs"] += 1
+                c["faces_planned"] += len(faces)
+                if not args.apply:
+                    continue
+                new = action == "move_new"
+                if new:
+                    dest = ctx.api.create_person()
+                    c["people_created"] += 1
+                else:
+                    try:
+                        ctx.api.person(dest)
+                    except ImmichError:
+                        c["dest_gone"] += 1
+                        continue
+                for f in faces:
+                    ctx.api.move_face(dest, f)
+                    ctx.store.audit_face_move(run_id, src_run, f, pid, dest, lab, new)
+                    c["faces_moved"] += 1
+        stats = {"review": str(args.review), "mode": "write" if args.apply else "dry run", **c}
+        ctx.store.finish_run(run_id, "ok", stats)
+        log.info("purity-apply %s: %s (undo: purity-undo --run %s)", run_id, json.dumps(stats), run_id)
+        return 0
+    except Exception as exc:
+        ctx.store.finish_run(run_id, "failed", {"error": f"{type(exc).__name__}: {exc}", **c})
+        raise
+    finally:
+        ctx.close()
+
+
+def cmd_purity_undo(s: LabelerSettings, args) -> int:
+    """Move the faces of a purity-apply run back, when they are still where the run put them."""
+    ctx = Context(s)
+    run_id = new_run_id()
+    ctx.store.start_run(run_id, "purity-undo")
+    c: Counter = Counter()
+    try:
+        ctx.owner()
+        moves = ctx.store.face_moves(args.run)
+        now = ctx.db.face_people([m[1] for m in moves])
+        for move_id, face, src, dst in moves:
+            if now.get(face) != dst:
+                c["changed_since"] += 1  # moved again or deleted since: leave it alone
+                continue
+            ctx.api.move_face(src, face)
+            ctx.store.face_move_undone(move_id, run_id)
+            c["undone"] += 1
+        ctx.store.finish_run(run_id, "ok", {"run": args.run, **c})
+        log.info("purity-undo %s: %s", run_id, dict(c))
+        return 0
+    finally:
+        ctx.close()
+
+
 def load_folders(ctx, s: LabelerSettings, owner: str):
     """Folder references and their overlap with people (as ``run`` builds them)."""
     roots = sorted({r.root for r in s.sources.folders})
@@ -799,6 +1007,28 @@ def build_parser() -> argparse.ArgumentParser:
         "recheck-votes", help="read-only: re-check every person named from the vote with the anchored rule (report)"
     )
     rv.add_argument("--top", type=int, default=2000, help="suspects shown with a picture in the report")
+    pu = sub.add_parser("purity", help="read-only: clusters holding several people, and how to split them (report)")
+    pu.add_argument("--named-min-faces", type=int, default=20, help="named clusters with at least this many faces")
+    pu.add_argument("--unnamed-min-faces", type=int, default=300, help="unnamed clusters with at least this many faces")
+    pu.add_argument("--person", nargs="*", help="only these person ids")
+    pu.add_argument("--top", type=int, default=300, help="worst unnamed clusters shown (all named ones are shown)")
+    pu.add_argument("--sample", type=int, default=300, help="faces sampled per cluster")
+    pu.add_argument("--batch", type=int, default=200, help="clusters per database query")
+    pu.add_argument("--crops", type=int, default=6, help="face pictures per sub-identity (0 = none)")
+    pu.add_argument("--link", type=float, default=0.5, help="average-linkage cut (cosine)")
+    pu.add_argument("--keep", type=float, default=0.45, help="sub-identity within this of the main one: same person")
+    pu.add_argument("--foreign", type=float, default=0.5, help="sub-identity further than this: another person")
+    pu.add_argument("--match", type=float, default=0.35, help="foreign -> existing cluster within this")
+    pu.add_argument(
+        "--min-new", type=int, default=3, help="sampled faces a foreign sub-identity needs for a new person"
+    )
+    pu.add_argument("--out", help="directory for the HTML + CSV (default LABELER_OUTPUT_DIR or .)")
+    pa = sub.add_parser("purity-apply", help="move faces of the sub-identities approved in a purity review CSV")
+    pa.add_argument("--review", required=True, help="the purity CSV with approve=yes on the rows to apply")
+    pa.add_argument("--apply", action="store_true", help="write (default: dry run, counts only)")
+    pa.add_argument("--max-faces", type=int, default=5000, help="cap of faces moved per command")
+    pv = sub.add_parser("purity-undo", help="move the faces of a purity-apply run back")
+    pv.add_argument("--run", required=True, help="purity-apply run id")
     st = sub.add_parser("status", help="recent runs")
     st.add_argument("--limit", type=int, default=10)
     return ap
@@ -821,6 +1051,9 @@ def main(argv: list[str] | None = None) -> int:
             "export": cmd_export,
             "recheck-votes": cmd_recheck_votes,
             "status": cmd_status,
+            "purity": cmd_purity,
+            "purity-apply": cmd_purity_apply,
+            "purity-undo": cmd_purity_undo,
         }
         return commands[args.command](s, args)
     except (ConfigError, ImmichError, LookupError) as exc:

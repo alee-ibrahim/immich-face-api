@@ -96,6 +96,34 @@ SELECT g, y FROM (
 """
 
 
+# purity sweep: sampled faces with their box (crops for the report) and all current faces of one person (apply).
+# Needs SELECT on asset_face "imageWidth", "imageHeight" too.
+_PURITY_SAMPLES_SQL = f"""
+SELECT g, fid, aid, x1, y1, x2, y2, w, h, emb FROM (
+  SELECT af."personGroupId"::text AS g, af.id::text AS fid, af."assetId"::text AS aid,
+         af."boundingBoxX1" AS x1, af."boundingBoxY1" AS y1, af."boundingBoxX2" AS x2, af."boundingBoxY2" AS y2,
+         af."imageWidth" AS w, af."imageHeight" AS h, fs.embedding::text AS emb,
+         row_number() OVER (PARTITION BY af."personGroupId" ORDER BY md5(af.id::text)) AS rn
+  FROM asset_face af JOIN face_search fs ON fs."faceId" = af.id
+  WHERE af."ownerId" = %(owner)s AND af."personGroupId" = ANY(%(ids)s::uuid[]) AND {_FACE_FILTER}
+) x WHERE rn <= %(k)s
+"""
+
+_PERSON_FACES_SQL = f"""
+SELECT af.id::text, fs.embedding::text
+FROM asset_face af JOIN face_search fs ON fs."faceId" = af.id
+WHERE af."ownerId" = %(owner)s AND af."personGroupId" = %(pid)s::uuid AND {_FACE_FILTER}
+"""
+
+
+@dataclass
+class SampledFace:
+    face_id: str
+    asset_id: str
+    box: tuple[int, int, int, int, int, int]  # x1, y1, x2, y2, image width, image height
+    embedding: np.ndarray
+
+
 class ImmichError(RuntimeError):
     pass
 
@@ -200,6 +228,40 @@ class ImmichDB:
                         out.setdefault(g, []).append(int(y))
         return out
 
+    def purity_samples(self, owner: str, person_ids: list[str], k: int) -> dict[str, list[SampledFace]]:
+        """Up to ``k`` faces per person (stable pseudo-random choice), with box and embedding; batches of 200."""
+        out: dict[str, list[SampledFace]] = {}
+        for i in range(0, len(person_ids), 200):
+            with self.conn.cursor() as cur:
+                cur.execute(_PURITY_SAMPLES_SQL, {"owner": owner, "ids": person_ids[i : i + 200], "k": k})
+                for g, fid, aid, x1, y1, x2, y2, w, h, emb in cur:
+                    out.setdefault(g, []).append(
+                        SampledFace(fid, aid, (x1, y1, x2, y2, w, h), normalise(parse_vector(emb)))
+                    )
+        return out
+
+    def person_faces(self, owner: str, person_id: str) -> tuple[list[str], np.ndarray]:
+        """Every current (visible, not deleted) face of one person: ids and normalised embeddings."""
+        ids, embs = [], []
+        with self.conn.cursor() as cur:
+            cur.execute(_PERSON_FACES_SQL, {"owner": owner, "pid": person_id})
+            for fid, emb in cur:
+                ids.append(fid)
+                embs.append(parse_vector(emb))
+        return ids, (normalise(np.stack(embs)) if embs else np.zeros((0, 0), np.float32))
+
+    def face_people(self, face_ids: list[str]) -> dict[str, str | None]:
+        """Current person of each face (purity-undo)."""
+        out: dict[str, str | None] = {}
+        for i in range(0, len(face_ids), 1000):
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    'SELECT id::text, "personGroupId"::text FROM asset_face WHERE id = ANY(%s::uuid[]) AND "deletedAt" IS NULL',
+                    (face_ids[i : i + 1000],),
+                )
+                out.update(dict(cur.fetchall()))
+        return out
+
     def named_people(self, owner: str) -> list[tuple[str, str]]:
         """(person id, name) of every named person of the owner (tidy-names)."""
         with self.conn.cursor() as cur:
@@ -251,6 +313,29 @@ class ImmichAPI:
     def thumbnail(self, person_id: str) -> bytes | None:
         r = self.client.get(f"/api/people/{person_id}/thumbnail", headers={"accept": "image/*"})
         return r.content if r.status_code == 200 else None
+
+    def preview(self, asset_id: str) -> bytes | None:
+        """The asset's preview image (needs asset.view); None when not allowed or missing."""
+        r = self.client.get(
+            f"/api/assets/{asset_id}/thumbnail", params={"size": "preview"}, headers={"accept": "image/*"}
+        )
+        return r.content if r.status_code == 200 else None
+
+    def create_person(self) -> str:
+        """A new unnamed person of the key's user (person.create); returns its id."""
+        r = self.client.post("/api/people", json={})
+        if r.status_code not in (200, 201):
+            raise ImmichError(f"POST /api/people: HTTP {r.status_code}")
+        pid = r.json().get("id")
+        if not pid:
+            raise ImmichError("unexpected POST /api/people answer")
+        return pid
+
+    def move_face(self, person_id: str, face_id: str) -> None:
+        """Reassign one face to a person (face.update): PUT /api/faces/{person} {"id": face}."""
+        r = self.client.put(f"/api/faces/{person_id}", json={"id": face_id})
+        if r.status_code != 200:
+            raise ImmichError(f"PUT /api/faces/{person_id}: HTTP {r.status_code}")
 
     def set_name(self, person_id: str, name: str) -> dict:
         r = self.client.put(f"/api/people/{person_id}", json={"name": name})
