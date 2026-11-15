@@ -1172,11 +1172,40 @@ python -m immich_face_api.labeler worklist --top 200        # biggest unnamed pe
 python -m immich_face_api.labeler tidy-names [--apply]      # remove titles from owner names (below)
 python -m immich_face_api.labeler tidy-names --copies [--apply]   # ... and from copies that follow the owner name
 python -m immich_face_api.labeler recheck-votes [--top 2000]   # read-only: re-check names written from the vote
+python -m immich_face_api.labeler purity [--top 300]        # read-only: clusters that hold several people (below)
+python -m immich_face_api.labeler purity-apply --review <csv> [--apply]   # split approved sub-identities
+python -m immich_face_api.labeler purity-undo --run <purity-apply-run>
 python -m immich_face_api.labeler status
 ```
 
 Suggested review flow: open the HTML report; for the medium band, note the person ids that are **wrong** and apply the
 band with `--exclude` for those (reviewers usually reject few); anything else, name directly in Immich.
+
+### Purity sweep (`purity`, `purity-apply`, `purity-undo`)
+
+Immich gives a new face the person of the nearest already-assigned face within `maxDistance` (single linkage), so
+small or blurry faces can chain several people into one cluster. The labeler only names clusters; the purity sweep
+splits them, report first:
+
+- `purity` (read-only): for every named cluster with at least `--named-min-faces` faces and every unnamed one with at
+  least `--unnamed-min-faces`, it samples `--sample` faces, groups them into sub-identities (average linkage, cosine
+  `--link` 0.5) and takes the biggest as the MAIN one. A sub-identity within `--keep` (0.45) of the main centroid
+  stays; further than `--foreign` (0.5) is foreign; in between is borderline (left for curators). A foreign
+  sub-identity goes to the nearest other cluster within `--match` (0.35), else to a new unnamed person if it has at
+  least `--min-new` (3) sampled faces. Output: an HTML contact sheet (face crops; needs `asset.view` on the key, else
+  no pictures) and a CSV with one row per sub-identity that is not kept, named clusters first, then the `--top`
+  worst unnamed ones. The plan (sub-identity centroids) is stored in the state database.
+- Review: set `approve` to `yes` on the CSV rows to apply.
+- `purity-apply --review <csv>` (dry run unless `--apply`): every CURRENT face of an approved person is matched to
+  its nearest stored sub-identity centroid; faces nearest to an approved sub-identity are moved one by one with
+  `PUT /api/faces/{person}` (new people with `POST /api/people`), each move audited in `labeler_face_move`.
+  `--max-faces` caps a command. A person already split from the same report is skipped. The key needs
+  `person.read`, `person.create`, `face.update` (and `user.read` for the owner check).
+- `purity-undo --run <purity-apply-run>` moves the faces back, only those still where the run put them. People it
+  created stay (empty people are hidden by Immich; delete them in the UI if wanted).
+
+Names are never changed by the sweep. Extra database privilege: SELECT on `asset_face` `"imageWidth"`,
+`"imageHeight"` (face boxes for the crops).
 
 ### Shared copies (`share-names`)
 

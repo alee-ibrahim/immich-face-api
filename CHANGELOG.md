@@ -5,6 +5,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added (labeler: purity sweep)
+- `purity` (read-only report: sub-identities of a cluster by average linkage, main vs foreign, best existing cluster
+  or a new person; HTML contact sheet + review CSV, named clusters first), `purity-apply --review <csv>` (moves only
+  approved sub-identities' faces through the Immich API, audited in `labeler_face_move`) and `purity-undo --run`.
+
 ### Changed (labeler: only a voter's main faces vote)
 - In the named-neighbour vote (and `recheck-votes`), only the sampled faces of a named person's main sub-identity vote:
   seed = the face with most neighbours within `vote_voter_max_distance` (0.40), then the faces within that distance of
