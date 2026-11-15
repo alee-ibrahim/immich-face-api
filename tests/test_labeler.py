@@ -870,6 +870,36 @@ def test_roster_cards_from_url_and_validation():
         WebSource(key="r", label="R", kind="roster")
 
 
+def test_look_alike_guard_holds_in_the_batched_vote(monkeypatch):
+    """The guard runs on the batched nearest faces: same holds with tiny batches/tiles as with the default ones, and a
+    look-alike cluster is held while the clear one is not, also when they share a batch with other clusters."""
+    from immich_face_api.labeler import match
+
+    a, c = person(), person()
+    twin = normalise(a + RNG.normal(scale=0.02, size=DIM))
+    named = {
+        "NA": np.stack([face_of(a) for _ in range(10)]),
+        "NT": np.stack([face_of(twin) for _ in range(10)]),
+        "NC": np.stack([face_of(c) for _ in range(10)]),
+    }
+    names = {"NA": "Ahmed Didi", "NT": "Ahmed Hisham Wajeeh", "NC": "Mariyam Shifa"}
+    unnamed = {f"A{i}": np.stack([face_of(a) for _ in range(6)]) for i in range(3)}
+    unnamed |= {f"C{i}": np.stack([face_of(c) for _ in range(6)]) for i in range(3)}
+    unnamed["X"] = np.stack([face_of(person()) for _ in range(4)])
+    faces = {k: len(v) for k, v in unnamed.items()}
+
+    def key(votes):
+        return sorted((v.person_id, v.identity.name, v.band, v.distance, tuple(v.hold)) for v in votes)
+
+    want = key(match.named_vote(unnamed, named, names, faces, T))
+    by = {w[0]: w for w in want}
+    assert all(by[f"A{i}"][4] and "look-alike" in by[f"A{i}"][4][0] for i in range(3))
+    assert all(not by[f"C{i}"][4] and by[f"C{i}"][2] == "high" for i in range(3)) and "X" not in by
+    real = match.nearest_named
+    monkeypatch.setattr(match, "nearest_named", lambda u, n: real(u, n, rows=5, cols=4))
+    assert key(match.named_vote(unnamed, named, names, faces, T)) == want
+
+
 def test_named_vote_holds_look_alikes():
     from immich_face_api.labeler.match import lookalike_names, named_vote
 
