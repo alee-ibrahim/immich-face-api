@@ -1068,7 +1068,9 @@ More source kinds:
   portrait, roster or curated override (from the audit log). A person the labeler named from the vote itself votes
   only when its centroid is within `vote_anchor_distance` (0.45) of an anchor with the same name; 0 = never. Without
   this, one wrongly voted cluster (for example a cluster that mixes two look-alike people) passes the name on to the
-  clusters that are near it, and those to theirs. **Review holds** on high and medium votes: a *mixed cluster*
+  clusters that are near it, and those to theirs. Within a voter, only the faces of its *main sub-identity* vote
+  (within `vote_voter_max_distance`, 0.40, of it; 0 = all): named clusters are often partly mixed, and a foreign face
+  in a correctly named cluster must not pass the name on. **Review holds** on high and medium votes: a *mixed cluster*
   (median distance of its sampled faces to their centroid >= `vote_max_spread`, 0.40, with at least
   `vote_spread_min_faces` sampled; or photos in two eras at least `vote_era_gap_years`, 8, apart with
   `vote_era_min_share`, 0.2, of the photos on each side), and *folder evidence*: person-named folders whose person

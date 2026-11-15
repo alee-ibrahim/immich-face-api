@@ -78,6 +78,9 @@ class Thresholds:
     # curated override), plus vote-named people within vote_anchor_distance (centroids) of an anchor with the same name
     # (0 = vote-named people never vote). Stops chains of votes through a wrongly voted cluster.
     vote_anchor_distance: float = 0.45
+    # only the faces of a voter's MAIN sub-identity vote (within this distance of it): foreign faces inside a named
+    # cluster (clusters are often mixed) do not pass its name on. 0 = every sampled face votes.
+    vote_voter_max_distance: float = 0.40
     # review holds on vote proposals (0 disables each): a mixed cluster (median face-to-centroid distance of its
     # sampled faces >= vote_max_spread, with at least vote_spread_min_faces sampled; or photos in two eras at least
     # vote_era_gap_years apart with vote_era_min_share of the photos on each side; needs the asset date column), and
