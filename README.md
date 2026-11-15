@@ -823,7 +823,7 @@ More source kinds:
   face (within `maxDistance`), as Immich itself assigns faces. Measured on one archive (leave one named cluster out):
   267 right, 1 wrong at a vote share >= 0.8; no wrong vote for people with a single cluster. A vote that agrees with a
   reference proposal is extra evidence; one that disagrees holds the proposal.
-  **Look-alike guard**: the vote is held (never written) when its faces are not clearly closer to the voted name
+  **Look-alike guard** (high and medium votes, the ones that could be written): the vote is held when its faces are not clearly closer to the voted name
   than to any other named person (median per-face gap below `vote_min_name_gap`, 0.05), or below
   `vote_lookalike_min_gap` (0.10) when the voted name has a known look-alike (another person's name whose faces'
   centroid is within `vote_lookalike_distance`, 0.40). Names count as the same person only when they share a key or
