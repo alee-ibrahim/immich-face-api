@@ -1,0 +1,14 @@
+{# Code blocks for the public docs. Bodies are captured with {% set %} blocks and escaped here (codetext). #}
+{% macro code(langs) -%}
+<div class="tabs" data-tabs>
+  <div class="tablist" role="tablist">
+    {% for lang, label, _ in langs %}<button type="button" class="tab" role="tab" data-lang="{{ lang }}">{{ label }}</button>{% endfor %}
+  </div>
+  {% for lang, label, body in langs %}
+  <div class="pane" data-lang="{{ lang }}" role="tabpanel"><button type="button" class="copy ghost">Copy</button><pre><code>{{ body | codetext }}</code></pre></div>
+  {% endfor %}
+</div>
+{%- endmacro %}
+{% macro block(body) -%}
+<div class="pane solo"><button type="button" class="copy ghost">Copy</button><pre><code>{{ body | codetext }}</code></pre></div>
+{%- endmacro %}

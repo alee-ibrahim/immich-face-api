@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 from prometheus_client import start_http_server
 from psycopg_pool import PoolTimeout
 
-from . import __version__
+from . import __version__, opendocs
 from . import changes as ch
 from . import metrics as m
 from .config import ConfigError, Settings
@@ -33,7 +33,6 @@ from .facecache import FaceCache, same_person_rule
 from .imaging import ImageRejected, prepare
 from .matching import decide, name_key, normalise_box
 from .ml import MLClient, MLError
-from .openapi import OPENAPI_SPEC
 from .requestlog import FaceRecord, RequestLogWriter, RequestRecord, embedding_bytes, kind_of, make_crop, wants_crop
 from .scrub import scrub_breadcrumb, scrub_event
 from .security import ApiKeys, RateLimiter, token_from_headers
@@ -761,7 +760,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             writer.submit(request_record(request, endpoint, response.status_code, elapsed))
         m.LATENCY.labels(endpoint).observe(elapsed)
         response.headers["X-Request-Id"] = request.state.rid
-        response.headers["Cache-Control"] = "no-store"
+        response.headers.setdefault("Cache-Control", "no-store")  # only the open docs set their own
         response.headers["X-Content-Type-Options"] = "nosniff"
         if endpoint not in ("/healthz", "/readyz"):
             log.info(
@@ -820,7 +819,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def openapi_spec(request: Request):
         if not request.app.state.face.s.enable_openapi:
             return JSONResponse({"error": {"code": "not_found", "message": "not found"}}, status_code=404)
-        return JSONResponse(OPENAPI_SPEC)
+        return JSONResponse(opendocs.spec_for(request.app.state.face.s, request))
 
     @app.get("/readyz")
     async def readyz(request: Request):
@@ -1047,6 +1046,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request.state.log = {**(request.state.log or {}), "error_code": exc.code}
             return error_response(exc)
 
+    opendocs.register(app, settings)
     return app
 
 

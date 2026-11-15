@@ -5,6 +5,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added (open developer docs)
+- `FACE_API_OPEN_DOCS=true` (default off): the API serves login-free, read-only docs for app developers:
+  `GET /docs` (API reference with curl/PHP/Python/Node examples, main-subject fields, verify's `subject` option,
+  limits, errors, retries and a generated field reference) and `GET /docs/integration` (integration guide: member
+  mapping, confirmation, profile pages, nightly sync from the change feed, re-checking with verify, privacy), with
+  assets under `/docs/static/`. Strict CSP, no inline code, no admin content. The base URL is
+  `FACE_API_DOCS_BASE_URL`; with the flag on, `GET /openapi.json` lists it in `servers`.
+- Responses keep a `Cache-Control` a route sets itself (only the docs do); everything else is still `no-store`.
+
 ### Changed (labeler: anchored named-neighbour vote)
 - Only anchors vote: people named by a person, or by the labeler from a folder, portrait, roster or curated override.
   A person named from the vote itself votes only within `vote_anchor_distance` (0.45, centroids) of an anchor with the

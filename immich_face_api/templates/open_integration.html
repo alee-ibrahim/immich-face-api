@@ -1,0 +1,309 @@
+{% extends "open_base.html" %}
+{% import "_open_macros.html" as m %}
+{% block title %}Integration guide{% endblock %}
+{% block body %}
+<div class="docs">
+<nav class="toc" aria-label="On this page">
+  <b>On this page</b>
+  <a href="#model">How it fits together</a>
+  <a href="#store">What to store</a>
+  <a href="#members">Members and person ids</a>
+  <a href="#suggest">Suggest, then confirm</a>
+  {% if lim.subject != "off" %}<a href="#profiles">Profile pages</a>{% endif %}
+  {% if lim.changes %}<a href="#sync">Nightly sync</a>{% endif %}
+  <a href="#recheck">Re-checking tags</a>
+  <a href="#server-side">Server side only</a>
+  <a href="#reliability">Reliability</a>
+  <a href="#privacy">Privacy</a>
+  <a href="#checklist">Checklist</a>
+  <a href="/docs">← API reference</a>
+</nav>
+<article>
+<h1>Integration guide</h1>
+<p class="lead">How to add "who is in this photo" to your website or app: the face API suggests, your staff confirm, and
+your app keeps the confirmed tags in its own database, linked to its own people (members, staff, guests).</p>
+<div class="callout">Base URL: <code>{{ base }}</code>. Every call needs an API key, issued by the operator of this
+service: contact them for one (one key per app and environment). Endpoint details are in the
+<a href="/docs">API reference</a>.</div>
+
+<h2 id="model">How it fits together</h2>
+<ol class="steps">
+  <li>The <b>photo archive</b> holds the photos and the <b>named people</b> (named by its curators). Each named person has
+    a stable <code>person_id</code>. The face API only reads it.</li>
+  <li>Your app sends a photo to <code>POST /v1/identify</code> and gets <b>suggestions</b>: a box per face and the named
+    person it most likely shows.</li>
+  <li><b>Your staff confirm</b> or correct the suggestions in your app's admin. Only confirmed tags are published.</li>
+  <li>Your app maps each <code>person_id</code> to <b>your own id</b> (a member id, for example), keeps that mapping up to
+    date{% if lim.changes %} with the nightly change feed{% endif %}, and re-checks tags with <code>POST /v1/verify</code>
+    when the archive changes.</li>
+</ol>
+
+<h2 id="store">What to store</h2>
+<p>A minimal schema (adapt the names and types to your framework):</p>
+{% set c %}
+-- your own people; the face API knows nothing about them
+-- members(id, name, ...)
+
+-- which archive person ids are which member: ONE member can have MANY person_ids
+CREATE TABLE face_person_map (
+  person_id     uuid PRIMARY KEY,          -- from the face API
+  member_id     bigint NOT NULL REFERENCES members(id),
+  archive_name  text,                      -- the archive's name, for display in your admin
+  status        text NOT NULL DEFAULT 'current',  -- current | merged | hidden | unnamed | deleted
+  mapped_by     text NOT NULL,             -- who made the link
+  mapped_at     timestamptz NOT NULL DEFAULT now()
+);
+
+-- suggestions from identify (pending until a person decides)
+CREATE TABLE photo_face_suggestions (
+  id          bigserial PRIMARY KEY,
+  photo_id    bigint NOT NULL,
+  box         jsonb NOT NULL,              -- {"x","y","w","h"} as fractions
+  person_id   uuid,                        -- null = unknown face
+  distance    real,
+  ambiguous   boolean NOT NULL DEFAULT false,
+  role        text,                        -- main | co_subject | background
+  prominence  real,
+  status      text NOT NULL DEFAULT 'pending',  -- pending | confirmed | rejected
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- the published tags: written only when staff confirm
+CREATE TABLE photo_tags (
+  id                     bigserial PRIMARY KEY,
+  photo_id               bigint NOT NULL,
+  member_id              bigint NOT NULL REFERENCES members(id),
+  person_id              uuid,           -- the archive person at confirmation time
+  box                    jsonb,
+  role                   text,
+  subject_model_version  text,
+  confirmed_by           text NOT NULL,
+  confirmed_at           timestamptz NOT NULL DEFAULT now(),
+  needs_review           boolean NOT NULL DEFAULT false,
+  UNIQUE (photo_id, member_id)
+);
+
+-- your position in the change feed
+CREATE TABLE face_sync_state (id int PRIMARY KEY DEFAULT 1, cursor text, synced_at timestamptz);
+{% endset %}{{ m.block(c) }}
+
+<h2 id="members">Members and person ids</h2>
+<ul>
+  <li><b>Store your own id.</b> Your pages, search and profiles use <b>your</b> member id, never the archive's
+    <code>person_id</code> or name directly. The <code>person_id</code> is the link between the two.</li>
+  <li><b>One member, many person ids.</b> The archive can hold the same person as several groups of faces (different
+    years, different photographers, a split that was not merged back). Map each of them to the same member. When
+    identify returns a <code>person_id</code> you have not mapped yet, show it to staff as "map to which member?".</li>
+  <li><b>Names are display only.</b> The archive's spelling can change (see <code>renamed</code>); your member record
+    stays the source of truth for your site.</li>
+  <li>Mapping is a staff decision: do not map automatically by name, even when the names look identical.</li>
+</ul>
+
+<h2 id="suggest">Suggest, then confirm</h2>
+<ol class="steps">
+  <li>When a photo is added, queue a <b>background job</b> that calls <code>POST /v1/identify?candidates=3</code> once
+    and stores each face as a <i>pending suggestion</i>. Never call it while rendering a page.</li>
+  <li>In your admin, draw each box on the photo with the suggested name as a question ("Jane Example? ✓ ✗"). When
+    <code>ambiguous</code> is <code>true</code>, show the candidates and pre-select nobody. Unknown faces
+    (<code>person_id</code> <code>null</code>) are for staff to tag by hand or skip.</li>
+  <li>On ✓, write a <code>photo_tags</code> row with your member id (via the mapping), the <code>person_id</code>, the box,
+    the role, who confirmed and when. On ✗, mark the suggestion <code>rejected</code> so a re-run does not ask again.</li>
+  <li><b>Staff-confirmed tags are authoritative.</b> No later API answer (identify, verify or a change event) may
+    overwrite or delete a confirmed tag automatically: at most flag it with <code>needs_review</code> for staff.</li>
+  <li><code>confidence</code> is a hint, not a probability: never auto-confirm on it.</li>
+</ol>
+
+{% if lim.subject != "off" %}
+<h2 id="profiles">Profile pages</h2>
+<p>A member's profile should show photos <b>about</b> that member, not every crowd shot they appear in. Use the
+<code>role</code> stored with the confirmed tag:</p>
+{% set c %}
+-- photos for a member's profile page: the photo is about them (alone or with a few others)
+SELECT p.*
+FROM photo_tags t JOIN photos p ON p.id = t.photo_id
+WHERE t.member_id = :member AND t.role IN ('main', 'co_subject')
+ORDER BY p.taken_at DESC;
+{% endset %}{{ m.block(c) }}
+<ul>
+  <li><code>role = 'main'</code> only: photos about that person alone (a portrait for a header image, for example).</li>
+  <li><code>background</code> tags are still useful for search ("all photos with this member"), just not for the profile.</li>
+  <li>Staff may correct the role when confirming. Keep <code>subject_model_version</code> with the tag so you can re-score
+    older photos later with <code>POST /v1/verify</code> and <code>subject=1</code>.</li>
+</ul>
+{% endif %}
+
+{% if lim.changes %}
+<h2 id="sync">Nightly sync</h2>
+<p>The archive's curators keep naming, merging and splitting people. Once a night (or more often), read
+<code>GET /v1/people/changes</code> from your saved cursor and apply each event:</p>
+<table class="kv">
+  <tr><th>Event</th><th>What to do</th></tr>
+  <tr><td><code>renamed</code></td><td>update <code>archive_name</code> in your mapping. Tags and members stay as they are.</td></tr>
+  <tr><td><code>merged</code></td><td>the person <code>from_person_id</code> is gone; its faces are now
+    <code>into_person_id</code>. Point your mapping's <code>from_person_id</code> rows to <code>into_person_id</code>
+    (if both were mapped to <b>different</b> members, flag it for staff instead). Pending suggestions: rewrite the id.</td></tr>
+  <tr><td><code>faces_moved</code></td><td>a split or correction: <code>count</code> faces went from
+    <code>from_person_id</code> to <code>to_person_id</code>. Re-check the tags and pending suggestions of
+    <code>from_person_id</code> with <a href="#recheck">verify</a>; offer <code>to_person_id</code> as an alternative;
+    if <code>to_person_id</code> is new to you, ask staff which member it is.</td></tr>
+  <tr><td><code>deleted</code></td><td>the person was deleted, hidden or un-named (<code>reason</code>). Stop suggesting
+    it, drop its pending suggestions, set the mapping's <code>status</code>, and flag (do not delete) its confirmed tags
+    for review.</td></tr>
+  <tr><td><code>created</code></td><td>a newly named person: offer it to staff for mapping to a member; optionally re-run
+    identify on recent untagged photos.</td></tr>
+</table>
+{% set c_php %}
+// app/Console/Commands/FaceSync.php, scheduled daily
+$state = DB::table('face_sync_state')->first();
+$api = Http::withHeaders(['X-API-Key' => config('services.face_api.key')])->baseUrl('{{ base }}')->timeout(60);
+
+if (! $state?->cursor) {                       // first run: start from the full list
+    $state = (object) ['cursor' => $api->get('/v1/people')->throw()->json('changes_cursor')];
+}
+do {
+    $page = $api->get('/v1/people/changes', ['since' => $state->cursor, 'limit' => 1000])->throw()->json();
+    if ($page['resync_required']) {            // too old: re-sync everything, then continue
+        $this->fullResync($api);               // GET /v1/people + POST /v1/people/resolve on all mapped ids
+        $state->cursor = $api->get('/v1/people')->throw()->json('changes_cursor');
+        continue;
+    }
+    DB::transaction(function () use ($page) {
+        foreach ($page['changes'] as $e) {
+            match ($e['type']) {
+                'renamed' => FacePersonMap::where('person_id', $e['person_id'])->update(['archive_name' => $e['new_name']]),
+                'merged' => $this->merge($e['from_person_id'], $e['into_person_id']),
+                'faces_moved' => $this->queueRecheck($e['from_person_id'], $e['to_person_id']),
+                'deleted' => $this->retire($e['person_id'], $e['reason']),
+                'created' => $this->offerForMapping($e['person_id'], $e['name']),
+            };
+        }
+        DB::table('face_sync_state')->updateOrInsert(['id' => 1],
+            ['cursor' => $page['next_cursor'], 'synced_at' => now()]);
+    });
+    $state->cursor = $page['next_cursor'];
+} while ($page['has_more']);
+{% endset %}
+{% set c_py %}
+def sync(db, api):  # api = httpx.Client(base_url="{{ base }}", headers={"X-API-Key": KEY}, timeout=60)
+    cursor = db.get_cursor() or api.get("/v1/people").raise_for_status().json()["changes_cursor"]
+    while True:
+        page = api.get("/v1/people/changes", params={"since": cursor, "limit": 1000}).raise_for_status().json()
+        if page["resync_required"]:
+            full_resync(db, api)  # GET /v1/people + POST /v1/people/resolve on all mapped ids
+            cursor = api.get("/v1/people").raise_for_status().json()["changes_cursor"]
+            continue
+        with db.transaction():
+            for e in page["changes"]:
+                HANDLERS[e["type"]](db, e)  # renamed / merged / faces_moved / deleted / created
+            db.set_cursor(page["next_cursor"])
+        cursor = page["next_cursor"]
+        if not page["has_more"]:
+            break
+{% endset %}
+{% set c_node %}
+export async function sync(db) {
+  const api = (path) => fetch(`{{ base }}${path}`, { headers: { "X-API-Key": process.env.FACE_API_KEY } })
+    .then((r) => { if (!r.ok) throw new Error(`face api ${r.status}`); return r.json(); });
+  let cursor = (await db.getCursor()) ?? (await api("/v1/people")).changes_cursor;
+  for (;;) {
+    const page = await api(`/v1/people/changes?since=${encodeURIComponent(cursor)}&limit=1000`);
+    if (page.resync_required) {
+      await fullResync(db); // GET /v1/people + POST /v1/people/resolve on all mapped ids
+      cursor = (await api("/v1/people")).changes_cursor;
+      continue;
+    }
+    await db.transaction(async (tx) => {
+      for (const e of page.changes) await handlers[e.type](tx, e);
+      await tx.setCursor(page.next_cursor);
+    });
+    cursor = page.next_cursor;
+    if (!page.has_more) break;
+  }
+}
+{% endset %}
+{% set c_curl %}
+# one page by hand (the cursor comes from the previous page, or from GET /v1/people the first time)
+curl -sS "{{ base }}/v1/people/changes?since=pc_41&limit=1000" -H "X-API-Key: $FACE_API_KEY"
+{% endset %}
+{{ m.code([('curl', 'curl', c_curl), ('php', 'PHP', c_php), ('python', 'Python', c_py), ('node', 'Node', c_node)]) }}
+<ul>
+  <li>Save <code>next_cursor</code> in the <b>same transaction</b> as the changes you applied, so a crash replays a page
+    instead of skipping it. Handlers must be safe to run twice.</li>
+  <li><b>Full re-sync</b> (first run without a cursor, or <code>resync_required</code>): <code>GET /v1/people</code> for
+    the current names, then <code>POST /v1/people/resolve</code> with every <code>person_id</code> you hold (1000 per
+    call) and apply each <code>status</code>: <code>merged</code> → move to <code>current_person_id</code>;
+    <code>hidden</code>, <code>unnamed</code>, <code>deleted</code>, <code>unknown</code> → retire as for
+    <code>deleted</code>.</li>
+  <li>Changes are seen within about {{ lim.changes_minutes }} minutes; a nightly run is enough for most sites.</li>
+</ul>
+{% endif %}
+
+<h2 id="recheck">Re-checking tags</h2>
+<p><code>POST /v1/verify</code> answers "is this person still in this photo, and still the best match?" for tags you
+already have. Use it after {% if lim.changes %}a <code>faces_moved</code> or <code>merged</code> event, {% endif %}after
+a long time, or before publishing older unconfirmed suggestions. Send the stored box so only that face is compared;
+<code>POST /v1/verify/batch</code> takes up to {{ lim.verify_batch }} photos per call.</p>
+<table class="kv">
+  <tr><th>verdict</th><th>Unconfirmed suggestion</th><th>Staff-confirmed tag</th></tr>
+  <tr><td><code>match</code></td><td>keep</td><td>keep</td></tr>
+  <tr><td><code>match_not_best</code></td><td>replace with <code>best_person_id</code> as a new suggestion</td><td>keep, flag for review</td></tr>
+  <tr><td><code>no_match</code>, <code>no_face</code></td><td>drop</td><td>keep, flag for review</td></tr>
+  <tr><td><code>person_gone</code>, <code>no_reference</code></td><td>drop</td><td>keep, flag for review</td></tr>
+</table>
+<p>Confirmed tags are never removed by a verify result: a person decided, so a person reviews.</p>
+
+<h2 id="server-side">Server side only</h2>
+<ul>
+  <li><b>Never call the API from a browser or a mobile app.</b> The key would be visible to anyone; the API sends no CORS
+    headers on purpose. Your back end calls it; your pages read your own database.</li>
+  <li>Keep the key in your platform's secret store or encrypted environment variables (for example
+    <code>FACE_API_KEY</code> and <code>FACE_API_URL</code>), never in a repository, a front-end bundle, an error report
+    or a log line. Use a separate key for each environment (production, staging, local development).</li>
+  <li>Never put the key in a URL query string. Send it in the <code>X-API-Key</code> or <code>Authorization</code>
+    header.</li>
+  <li>If a key leaks, ask the operator to revoke it and issue a new one; rotation needs no downtime.</li>
+</ul>
+
+<h2 id="reliability">Reliability</h2>
+<ul>
+  <li>Your upload flow must never depend on this API: tagging can always wait. Call it from a queue with a
+    <b>120 s</b> timeout.</li>
+  <li>Retry only <code>429</code>, <code>502</code> and <code>503</code>, a few times, waiting <code>Retry-After</code>
+    seconds. Never retry <code>400</code>, <code>401</code>, <code>413</code> or <code>415</code>.</li>
+  <li>Stay under {{ lim.rate }} requests per minute per key (burst {{ lim.burst }}): for a backlog of old photos, run one
+    worker and let <code>Retry-After</code> pace it.</li>
+  <li>Send a web-size copy (2000–3000 px JPEG), not the original: faster, same result. Limit: {{ lim.max_mb }} MiB.</li>
+  <li>Call identify <b>once</b> per photo and keep the answer; refresh names from the change feed, not by re-identifying.</li>
+</ul>
+
+<h2 id="privacy">Privacy</h2>
+<ul>
+  <li><b>Faces are biometric data.</b> Treat suggestions, boxes and person ids as personal data in your app: restrict
+    who can see pending suggestions, and delete rejected or stale suggestions you no longer need.</li>
+  <li>Only people the archive's curators <b>named</b> can be returned. Unknown faces stay unknown: do not build a public
+    "find this face" or upload-a-selfie search on top of the API.</li>
+  <li>Publish only <b>confirmed</b> tags. Honour removal requests: remove the tag in your app, and tell the operator if
+    the person should also be un-named in the archive.</li>
+  <li>What this service keeps: your uploaded photo is <b>never stored</b> (it is processed in memory and dropped).
+    {% if lim.request_log %}A request log (time, app, status, image size, which named people were matched, and the
+    distances) is kept for {{ lim.request_days }} days{% if lim.crops != "none" %}, and small face crops are kept for
+    {{ lim.crop_days }} days so the archive's curators can name missed people{% endif %}. {% endif %}Hourly usage counts
+    per app contain no names.</li>
+  <li>Whether and how you may tag people (consent, purpose, informing them) is also your app's responsibility; follow
+    your organisation's data protection policy.</li>
+</ul>
+
+<h2 id="checklist">Checklist</h2>
+<ul>
+  <li>☐ An API key per environment, in the secret store, used only server side</li>
+  <li>☐ Identify runs in a background job with a 120 s timeout and retries on 429/502/503</li>
+  <li>☐ Suggestions stored as pending; staff confirm; confirmed tags never changed automatically</li>
+  <li>☐ Your member id mapped to one or more <code>person_id</code>s by staff</li>
+  {% if lim.subject != "off" %}<li>☐ Profile pages use <code>role</code> in (<code>main</code>, <code>co_subject</code>)</li>{% endif %}
+  {% if lim.changes %}<li>☐ Nightly sync from <code>/v1/people/changes</code>, cursor saved with the changes, re-sync on <code>resync_required</code></li>{% endif %}
+  <li>☐ Re-check affected tags with <code>/v1/verify</code>; flag, never delete, confirmed tags</li>
+  <li>☐ No face search for the public; removal requests handled</li>
+</ul>
+</article>
+</div>
+{% endblock %}

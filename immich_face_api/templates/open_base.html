@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{% block title %}Face API{% endblock %} · Face API docs</title>
+<link rel="stylesheet" href="/docs/static/base.css">
+<link rel="stylesheet" href="/docs/static/docs.css">
+</head>
+<body class="open-docs">
+<header><div class="bar">
+  <a class="brand" href="/docs">Face API docs</a>
+  <nav>
+    <a href="/docs" class="{{ 'on' if page == 'reference' }}">API reference</a>
+    <a href="/docs/integration" class="{{ 'on' if page == 'integration' }}">Integration guide</a>
+    {% if lim.openapi %}<a href="/openapi.json">openapi.json</a>{% endif %}
+  </nav>
+</div></header>
+<main>
+{% block body %}{% endblock %}
+</main>
+<footer>immich-face-api {{ version }} · base URL <code>{{ base }}</code></footer>
+<script src="/docs/static/docs.js"></script>
+</body>
+</html>
