@@ -145,6 +145,7 @@ over the plain variable.
 | `FACE_API_SAME_NAME_MAX_DISTANCE` | `0.6` | same-name people with centroids this close are one split person, not an ambiguity; `0` = off |
 | `FACE_API_ENABLE_PEOPLE` | `true` | `GET /v1/people` |
 | `FACE_API_ENABLE_OPENAPI` | `true` | `GET /openapi.json` (keep it internal) |
+| `FACE_API_OPEN_DOCS` | `false` | login-free, read-only developer docs served by the API: `GET /docs` (API reference) and `GET /docs/integration` (integration guide); see [Developer docs](#developer-docs-optional) |
 | `FACE_API_TEST_MODE` | `false` | allows `include_unnamed=1`. **Never in production** |
 | `FACE_API_METRICS_PORT` | `9090` | Prometheus `/metrics` on its own port; `0` = off |
 | `FACE_API_READINESS_INTERVAL` | `60` | seconds between readiness checks |
@@ -187,7 +188,8 @@ page for curators that calibrates [main-subject scoring](#main-subject). It is a
 process from the same image (`python -m immich_face_api admin`, port **8081**). Keep it on an internal network and
 never route it publicly; the API port (8080) never serves it. Its paths (`/`, `/login`, `/auth/callback`, `/logout`,
 `/usage`, `/requests`, `/missed`, `/faces`, `/crops`, `/privacy`, `/keys`, `/try`, `/subjects`, `/docs`, `/static`) do not overlap the API's (`/v1/*`, `/healthz`, `/openapi.json`), so one
-internal hostname can serve both: route `/v1/` and `/healthz` to the API, everything else to the admin.
+internal hostname can serve both: route `/v1/` and `/healthz` to the API, everything else to the admin. (With [developer docs](#developer-docs-optional) on, route
+`/docs`, `/docs/integration`, `/docs/static/` and `/openapi.json` to the API too: they replace the admin's `/docs` page.)
 
 | Page | What |
 | --- | --- |
@@ -247,6 +249,28 @@ or style.
 | `FACE_API_DOCS_BASE_URL` | request host | the API base URL shown in the admin docs (e.g. the public API host) |
 
 With a store configured, `FACE_API_API_KEYS` becomes optional.
+
+## Developer docs (optional)
+
+For the developers of the apps that call the API, who should not need an admin login. With
+`FACE_API_OPEN_DOCS=true` the **API** process serves, without a key or a login:
+
+| Path | What |
+| --- | --- |
+| `GET /docs` | API reference: quick start, authentication, every endpoint with request/response examples in curl, PHP, Python and Node, main-subject fields, limits and rate limits, errors and retries, and a field reference generated from the bundled OpenAPI document |
+| `GET /docs/integration` | integration guide: storing your own member id and mapping person ids to it (one member, many person ids), suggest-then-confirm, profile pages by `role`, the nightly sync from `/v1/people/changes`, re-checking tags with `/v1/verify`, server-side-only use, privacy |
+| `GET /docs/static/{base.css,docs.css,docs.js}` | the stylesheet and the tab/copy script (nothing else is served there) |
+| `GET /openapi.json` | the OpenAPI document (needs `FACE_API_ENABLE_OPENAPI`), with `servers` set to the docs base URL |
+
+The base URL in the examples is `FACE_API_DOCS_BASE_URL` (default: the request's own host). The pages are static and
+server-rendered: no database read, no admin links, no key management, no settings names; strict
+Content-Security-Policy (`default-src 'none'`, scripts and styles only from the same origin, no inline code, no
+framing). Sections follow the deployment (for example, the change feed only when it is on). How to get a key reads
+"contact the operator": add your own contact in your gateway or wiki.
+
+Where the docs are visible is the gateway's decision: route the exact paths `/docs`, `/docs/integration`,
+`/openapi.json` and the prefix `/docs/static/` to the API on the hostnames developers should use (an internal host
+only, or also the public one). The docs never include `/readyz`, the admin, or test-mode parameters.
 
 ## Request log and face crops
 

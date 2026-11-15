@@ -1,0 +1,661 @@
+{% extends "open_base.html" %}
+{% import "_open_macros.html" as m %}
+{% block title %}API reference{% endblock %}
+{% block body %}
+<div class="docs">
+<nav class="toc" aria-label="On this page">
+  <b>On this page</b>
+  <a href="#quick-start">Quick start</a>
+  <a href="#authentication">Authentication</a>
+  <a href="#identify">POST /v1/identify</a>
+  {% if lim.subject != "off" %}<a href="#subject" class="sub">Main subject</a>{% endif %}
+  <a href="#verify">POST /v1/verify</a>
+  <a href="#verify-batch" class="sub">POST /v1/verify/batch</a>
+  {% if lim.people %}<a href="#people">GET /v1/people</a>{% endif %}
+  {% if lim.changes %}<a href="#changes">GET /v1/people/changes</a>{% endif %}
+  {% if lim.people %}<a href="#resolve">POST /v1/people/resolve</a>{% endif %}
+  <a href="#health">GET /healthz</a>
+  <a href="#limits">Limits and rate limits</a>
+  <a href="#errors">Errors</a>
+  <a href="#retries">Retries: a full example</a>
+  <a href="#fields">Field reference</a>
+  <a href="/docs/integration">Integration guide →</a>
+  {% if lim.openapi %}<a href="/openapi.json">openapi.json</a>{% endif %}
+</nav>
+<article>
+<h1>Face API reference</h1>
+<p class="lead">The face API answers one question: <b>who is in this photo?</b> Send a photo; get back each face with a
+box and the <b>named person</b> it most likely shows, or <code>null</code>. Results are <b>suggestions for a person to
+confirm</b>, never automatic tags. It is a server-to-server API: call it from your back end only.</p>
+<p>How to build a tagging feature on top of it (storing tags, nightly sync, re-checking, profile pages, privacy):
+<a href="/docs/integration">Integration guide</a>.{% if lim.openapi %} Machine-readable description:
+<a href="/openapi.json">openapi.json</a> (OpenAPI 3.1).{% endif %}</p>
+
+<h2 id="quick-start">Quick start</h2>
+<ol class="steps">
+  <li><b>Base URL:</b> <code>{{ base }}</code></li>
+  <li><b>Get an API key:</b> keys are issued by the operator of this service. Contact them with your app's name and
+    a technical contact; you get one key per app (and a separate one for each test or staging environment). The key is
+    shown once: put it straight into your server's secret store or encrypted environment variables.</li>
+  <li><b>First call</b> (keep the key in an environment variable, not on the command line or in code):</li>
+</ol>
+{% set c %}
+export FACE_API_KEY="$(cat face-api.key)"   # the key you were given, saved to a file
+curl -sS "{{ base }}/v1/identify" \
+  -H "X-API-Key: $FACE_API_KEY" \
+  -F image=@photo.jpg
+{% endset %}{{ m.block(c) }}
+<p>You get <code>200</code> with a <code>faces</code> list (possibly empty). <code>401</code> means the key is missing,
+wrong, revoked or expired.</p>
+
+<h2 id="authentication">Authentication</h2>
+<p>Every <code>/v1</code> call needs the API key, in either header (one is enough):</p>
+{% set c %}
+X-API-Key: <your key>
+Authorization: Bearer <your key>
+{% endset %}{{ m.block(c) }}
+<ul>
+  <li>The key is checked <b>before</b> the photo is read, so a request without a valid key is rejected at once with
+    <code>401</code> and <code>WWW-Authenticate: Bearer</code>.</li>
+  <li>Usage and rate limits are counted per app (per key).</li>
+  <li><b>Rotation:</b> ask the operator for a second key for the same app, switch your app to it, then ask them to
+    revoke the old one. No downtime.</li>
+  <li><b>The key is a secret.</b> Use it only from your server: never in a browser, a mobile app, a front-end bundle, a
+    repository or a log line. The API sends no CORS headers on purpose. If a key leaks, tell the operator so it can be
+    revoked (revoked keys fail within about 30 seconds).</li>
+  <li><code>GET /healthz</code>{% if lim.openapi %} and <code>GET /openapi.json</code>{% endif %} need no key.</li>
+</ul>
+
+<h2 id="identify"><span class="method post">POST</span> /v1/identify</h2>
+<p>Finds the faces in one photo and matches each against the named people. Send the photo as
+<code>multipart/form-data</code> in the field <b><code>image</code></b>, or as the raw request body (with its
+<code>Content-Type</code>, e.g. <code>image/jpeg</code>).</p>
+<table class="kv">
+  <tr><th>Query</th><th>Default</th><th>Meaning</th></tr>
+  <tr><td><code>candidates</code></td><td><code>0</code></td><td>also return up to N ranked candidates per face (0–{{ lim.max_candidates }})</td></tr>
+  {% if lim.subject != "off" %}<tr><td><code>subject</code></td><td>{{ "<code>1</code>" | safe if lim.subject == "always" else "<code>0</code>" | safe }}</td><td><code>1</code>/<code>0</code>: score (or skip) the <a href="#subject">main subject</a> fields for this request</td></tr>{% endif %}
+</table>
+{% set c_curl %}
+curl -sS "{{ base }}/v1/identify?candidates=3" \
+  -H "X-API-Key: $FACE_API_KEY" \
+  -F image=@event.jpg
+
+# raw body instead of multipart:
+curl -sS "{{ base }}/v1/identify" \
+  -H "X-API-Key: $FACE_API_KEY" \
+  -H "Content-Type: image/jpeg" \
+  --data-binary @event.jpg
+{% endset %}
+{% set c_php %}
+// Laravel HTTP client; run it in a queued job, not in a page request
+$faces = Http::withHeaders(['X-API-Key' => config('services.face_api.key')])
+    ->timeout(120)
+    ->attach('image', $jpegBytes, 'photo.jpg')
+    ->post('{{ base }}/v1/identify?candidates=3')
+    ->throw()
+    ->json('faces');
+{% endset %}
+{% set c_py %}
+import os, httpx
+
+with open("event.jpg", "rb") as fh:
+    r = httpx.post(
+        "{{ base }}/v1/identify",
+        params={"candidates": 3},
+        files={"image": fh},
+        headers={"X-API-Key": os.environ["FACE_API_KEY"]},
+        timeout=120,
+    )
+r.raise_for_status()
+faces = r.json()["faces"]
+{% endset %}
+{% set c_node %}
+import { readFile } from "node:fs/promises";
+
+const form = new FormData();
+form.append("image", new Blob([await readFile("event.jpg")]), "event.jpg");
+const res = await fetch("{{ base }}/v1/identify?candidates=3", {
+  method: "POST",
+  headers: { "X-API-Key": process.env.FACE_API_KEY },
+  body: form,
+  signal: AbortSignal.timeout(120_000),
+});
+if (!res.ok) throw new Error(`face api ${res.status}`);
+const { faces } = await res.json();
+{% endset %}
+{{ m.code([('curl', 'curl', c_curl), ('php', 'PHP', c_php), ('python', 'Python', c_py), ('node', 'Node', c_node)]) }}
+
+<h3 id="response">Response</h3>
+{% set c %}
+{
+  "faces": [
+    {
+      "box": {"x": 0.412, "y": 0.18, "w": 0.061, "h": 0.103},
+      "detection_score": 0.83,
+      "person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10",
+      "name": "Jane Example",
+      "confidence": 0.71,
+      "distance": 0.29,
+      "ambiguous": false,{% if lim.subject != "off" %}
+      "prominence": 0.86,
+      "role": "main",
+      "subject_signals": {"area": 0.0063, "dominance": 0.92, "sharpness": 0.81, "centrality": 0.77, "...": "..."},{% endif %}
+      "candidates": [
+        {"person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "name": "Jane Example", "confidence": 0.71, "distance": 0.29, "votes": 7},
+        {"person_id": "0b7e3b7c-1a52-4d0e-9a9e-2f7c9a1d5e33", "name": "John Example", "confidence": 0.53, "distance": 0.47, "votes": 1}
+      ]
+    },
+    {
+      "box": {"x": 0.702, "y": 0.22, "w": 0.055, "h": 0.094},
+      "detection_score": 0.79,
+      "person_id": null, "name": null, "confidence": null, "distance": null, "ambiguous": false,{% if lim.subject != "off" %}
+      "prominence": 0.08, "role": "background", "subject_signals": {"...": "..."},{% endif %}
+      "candidates": []
+    }
+  ],
+  "image": {"w": 6000, "h": 4000},
+  "model": "{{ lim.model }}",
+  "max_distance": {{ lim.max_distance }},
+  "immich_version": "{{ lim.immich }}"{% if lim.subject != "off" %},
+  "photo_type": "small_group",
+  "main_face_index": 0,
+  "subject_model_version": "{{ lim.subject_version }}"{% endif %}
+}
+{% endset %}{{ m.block(c) }}
+<table class="kv">
+  <tr><th>Field</th><th>Meaning</th></tr>
+  <tr><td><code>box</code></td><td>where the face is, as <b>fractions (0–1)</b> of the upright photo (after EXIF rotation):
+    <code>x</code>, <code>y</code> = top-left corner, <code>w</code>, <code>h</code> = size. In pixels:
+    <code>x × image.w</code> etc. In CSS: <code>left: x×100%; top: y×100%; width: w×100%; height: h×100%</code>. Faces are
+    sorted left to right.</td></tr>
+  <tr><td><code>detection_score</code></td><td>how sure the detector is that this is a face</td></tr>
+  <tr><td><code>person_id</code></td><td>stable id of the person in the photo archive (survives renames). Store it with a
+    confirmed tag. <code>null</code> = no named match</td></tr>
+  <tr><td><code>name</code></td><td>the person's name as curated in the photo archive; <code>null</code> = unknown</td></tr>
+  <tr><td><code>distance</code></td><td>how far the face is from that person's closest known face: <b>0 = identical</b>;
+    matches only up to <code>{{ lim.max_distance }}</code>. Smaller is surer</td></tr>
+  <tr><td><code>confidence</code></td><td><code>1 − distance</code>: a hint for the person confirming, <b>not a
+    probability</b>. Never auto-accept on it</td></tr>
+  <tr><td><code>ambiguous</code></td><td><code>true</code> = another person is almost as close: show the candidates and
+    pre-select nobody</td></tr>
+  <tr><td><code>candidates</code></td><td>only with <code>?candidates=N</code>: ranked alternatives; <code>votes</code> =
+    how many of the nearest known faces are that person's</td></tr>
+  <tr><td><code>image</code></td><td>width and height of the upright photo</td></tr>
+  <tr><td><code>model</code>, <code>max_distance</code>, <code>immich_version</code></td><td>the recognition model, the
+    match threshold and the photo-archive version that answered (store them if you want to compare runs later)</td></tr>
+  {% if lim.subject != "off" %}
+  <tr><td><code>prominence</code></td><td>0–1: how much the photo is <b>about</b> this face</td></tr>
+  <tr><td><code>role</code></td><td><code>main</code>, <code>co_subject</code> or <code>background</code>; see
+    <a href="#subject">Main subject</a></td></tr>
+  <tr><td><code>subject_signals</code></td><td>the raw measurements behind <code>prominence</code> (size, dominance,
+    sharpness, position, edge cuts, exposure, ...). For debugging and your own rules; the names may grow over time</td></tr>
+  <tr><td><code>photo_type</code></td><td><code>portrait</code> (one subject), <code>small_group</code> (2–5),
+    <code>crowd</code> (more) or <code>none</code> (no face)</td></tr>
+  <tr><td><code>main_face_index</code></td><td>index into <code>faces</code> of the main face, or <code>null</code> (no
+    single main subject)</td></tr>
+  <tr><td><code>subject_model_version</code></td><td>the version of the scoring weights</td></tr>
+  {% endif %}
+</table>
+
+{% if lim.subject != "off" %}
+<h3 id="subject">Main subject: who the photo is about</h3>
+<p>Recognising someone is not the same as the photo being <b>about</b> them. Each face gets a <code>role</code>:
+<code>main</code> (the portrait, the speaker at the podium), <code>co_subject</code> (one of two or a few people the
+photo is about: a handshake, a small group posing) or <code>background</code> (the audience, people behind, small or
+blurred faces, one of many in a crowd shot), and a <code>prominence</code> from 0 to 1. It is measured from the photo
+itself: face size and how much it stands out from the other faces, sharpness, position in the frame, faces cut by the
+edge, exposure and the number of faces.
+{% if lim.subject == "always" %}It is on by default; <code>?subject=0</code> skips it.{% else %}Add
+<code>?subject=1</code> to get it.{% endif %}</p>
+<ul>
+  <li><b>Profile pages:</b> to list a person's photos, use the photos where that person's <code>person_id</code> has
+    <code>role</code> <code>main</code> or <code>co_subject</code>; <code>main</code> only for photos about that person
+    alone.</li>
+  <li><b>Verify:</b> add <code>subject=1</code> to <code>POST /v1/verify</code>; each claim then says
+    <code>is_main_subject</code>, with the face's <code>role</code> and <code>prominence</code>.</li>
+  <li>Store the role with the confirmed tag, and the <code>subject_model_version</code>: when the weights are
+    recalibrated you can re-check old photos with verify.</li>
+</ul>
+{% endif %}
+
+<h2 id="verify"><span class="method post">POST</span> /v1/verify</h2>
+<p>Re-checks <b>claimed people</b> (for example tags you stored months ago) against a photo. For each claimed
+<code>person_id</code> you get the distance from the nearest face in the photo to that person's faces, whether it is
+within the threshold, and who the best match for that face is <b>now</b>. Same key, limits and pipeline as identify;
+the photo is not stored.</p>
+<table class="kv">
+  <tr><th>Form field</th><th>Meaning</th></tr>
+  <tr><td><code>image</code></td><td>the photo (required)</td></tr>
+  <tr><td><code>person_id</code></td><td>the claimed person; repeat the field or comma-separate, at most {{ lim.verify_claims }}</td></tr>
+  <tr><td><code>box</code></td><td>optional: <code>x,y,w,h</code> (or the JSON box) from an earlier identify: then only
+    the face overlapping it is compared</td></tr>
+  {% if lim.subject != "off" %}<tr><td><code>subject</code></td><td>optional: <code>1</code> = also say whether the claimed
+    person is the photo's main subject (<code>is_main_subject</code>, <code>role</code>, <code>prominence</code> per
+    claim)</td></tr>{% endif %}
+</table>
+<p>With a raw image body, pass <code>person_id</code>, <code>box</code>{% if lim.subject != "off" %} and
+<code>subject</code>{% endif %} in the query string instead.</p>
+{% set c_curl %}
+curl -sS "{{ base }}/v1/verify" -H "X-API-Key: $FACE_API_KEY" \
+  -F image=@photo.jpg \
+  -F person_id=6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10 \
+  -F box=0.412,0.18,0.061,0.103{% if lim.subject != "off" %} \
+  -F subject=1{% endif %}
+{% endset %}
+{% set c_php %}
+$r = Http::withHeaders(['X-API-Key' => config('services.face_api.key')])
+    ->timeout(120)
+    ->attach('image', $jpegBytes, 'photo.jpg')
+    ->post('{{ base }}/v1/verify', [
+        'person_id' => $tag->person_id,
+        'box' => implode(',', [$tag->x, $tag->y, $tag->w, $tag->h]),{% if lim.subject != "off" %}
+        'subject' => 1,{% endif %}
+    ])
+    ->throw()
+    ->json();
+$claim = $r['claims'][0];   // $claim['verdict']: match | match_not_best | no_match | no_face | no_reference | person_gone
+{% endset %}
+{% set c_py %}
+with open("photo.jpg", "rb") as fh:
+    r = httpx.post(
+        "{{ base }}/v1/verify",
+        files={"image": fh},
+        data={"person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "box": "0.412,0.18,0.061,0.103"{% if lim.subject != "off" %}, "subject": "1"{% endif %}},
+        headers={"X-API-Key": os.environ["FACE_API_KEY"]},
+        timeout=120,
+    )
+r.raise_for_status()
+claim = r.json()["claims"][0]
+{% endset %}
+{% set c_node %}
+const form = new FormData();
+form.append("image", new Blob([await readFile("photo.jpg")]), "photo.jpg");
+form.append("person_id", "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10");
+form.append("box", "0.412,0.18,0.061,0.103");{% if lim.subject != "off" %}
+form.append("subject", "1");{% endif %}
+const res = await fetch("{{ base }}/v1/verify", {
+  method: "POST",
+  headers: { "X-API-Key": process.env.FACE_API_KEY },
+  body: form,
+  signal: AbortSignal.timeout(120_000),
+});
+const { claims } = await res.json();
+{% endset %}
+{{ m.code([('curl', 'curl', c_curl), ('php', 'PHP', c_php), ('python', 'Python', c_py), ('node', 'Node', c_node)]) }}
+{% set c %}
+{
+  "claims": [
+    {
+      "person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "status": "current",
+      "current_person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "name": "Jane Example",
+      "verdict": "match", "within_threshold": true, "distance": 0.29, "confidence": 0.71,
+      "face": 0, "box": {"x": 0.412, "y": 0.18, "w": 0.061, "h": 0.103},
+      "best_person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "best_name": "Jane Example"{% if lim.subject != "off" %},
+      "is_main_subject": true, "role": "main", "prominence": 0.86{% endif %}
+    }
+  ],
+  "faces": [{"box": {"x": 0.412, "y": 0.18, "w": 0.061, "h": 0.103}, "detection_score": 0.83,
+             "person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "name": "Jane Example", "distance": 0.29, "ambiguous": false}],
+  "image": {"w": 6000, "h": 4000}, "model": "{{ lim.model }}", "max_distance": {{ lim.max_distance }}, "immich_version": "{{ lim.immich }}"
+}
+{% endset %}{{ m.block(c) }}
+<table class="kv">
+  <tr><th>verdict</th><th>Meaning</th><th>Suggested action</th></tr>
+  <tr><td><code>match</code></td><td>a face is within the threshold and that person is also its best match</td><td>keep the tag</td></tr>
+  <tr><td><code>match_not_best</code></td><td>within the threshold, but another person is closer (<code>best_person_id</code>)</td><td>ask staff</td></tr>
+  <tr><td><code>no_match</code></td><td>no face is within the threshold (<code>distance</code> = the nearest anyway)</td><td>ask staff (unconfirmed suggestions: drop)</td></tr>
+  <tr><td><code>no_face</code></td><td>no face found (or none at <code>box</code>)</td><td>ask staff</td></tr>
+  <tr><td><code>no_reference</code></td><td>the person exists but has no faces left to compare with</td><td>ask staff</td></tr>
+  <tr><td><code>person_gone</code></td><td>the claimed id is deleted, hidden, un-named or unknown (see <code>status</code>)</td><td>see <a href="#changes">changes</a> and <a href="#resolve">resolve</a></td></tr>
+</table>
+<p><code>status</code> is as in <a href="#resolve">resolve</a>: a person that was <b>merged</b> is followed to the person
+it was merged into (<code>current_person_id</code>) and compared with that one.{% if lim.subject != "off" %}
+<code>is_main_subject</code> is <code>true</code> only for a <code>match</code> on the face whose role is
+<code>main</code>.{% endif %}</p>
+
+<h3 id="verify-batch"><span class="method post">POST</span> /v1/verify/batch</h3>
+<p>Several photos in one JSON body, the images base64-encoded: at most {{ lim.verify_batch }} items and {{ lim.max_mb }}
+MiB per call (base64 adds a third). One rate-limit token per photo. The answer is <code>{"items": [...]}</code> in
+order, each a verify response plus your <code>ref</code>, or <code>{"ref", "error"}</code> for a bad item; the batch
+stops on 429/502/503. It saves round trips, not work.</p>
+{% set c_curl %}
+# body.json: {"items": [{"ref": "photo-1", "image": "<base64>", "person_ids": ["6f1c1f0e-..."],
+#                        "box": {"x": 0.412, "y": 0.18, "w": 0.061, "h": 0.103}{% if lim.subject != "off" %}, "subject": true{% endif %}}]}
+curl -sS "{{ base }}/v1/verify/batch" -H "X-API-Key: $FACE_API_KEY" \
+  -H "Content-Type: application/json" --data-binary @body.json
+{% endset %}
+{% set c_php %}
+$items = $tags->map(fn ($t) => [
+    'ref' => (string) $t->id,
+    'image' => base64_encode(Storage::get($t->photo->web_path)),
+    'person_ids' => [$t->person_id],
+    'box' => ['x' => $t->x, 'y' => $t->y, 'w' => $t->w, 'h' => $t->h],
+])->values()->all();
+$results = Http::withHeaders(['X-API-Key' => config('services.face_api.key')])
+    ->timeout(300)
+    ->post('{{ base }}/v1/verify/batch', ['items' => $items])
+    ->throw()
+    ->json('items');
+{% endset %}
+{% set c_py %}
+import base64
+
+items = [{"ref": "photo-1", "image": base64.b64encode(open("p1.jpg", "rb").read()).decode(),
+          "person_ids": ["6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10"]}]
+r = httpx.post("{{ base }}/v1/verify/batch", json={"items": items},
+               headers={"X-API-Key": os.environ["FACE_API_KEY"]}, timeout=300)
+for item in r.json()["items"]:
+    print(item["ref"], item.get("error") or item["claims"][0]["verdict"])
+{% endset %}
+{% set c_node %}
+const items = [{
+  ref: "photo-1",
+  image: (await readFile("p1.jpg")).toString("base64"),
+  person_ids: ["6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10"],
+}];
+const res = await fetch("{{ base }}/v1/verify/batch", {
+  method: "POST",
+  headers: { "X-API-Key": process.env.FACE_API_KEY, "Content-Type": "application/json" },
+  body: JSON.stringify({ items }),
+  signal: AbortSignal.timeout(300_000),
+});
+const { items: results } = await res.json();
+{% endset %}
+{{ m.code([('curl', 'curl', c_curl), ('php', 'PHP', c_php), ('python', 'Python', c_py), ('node', 'Node', c_node)]) }}
+
+{% if lim.people %}
+<h2 id="people"><span class="method get">GET</span> /v1/people</h2>
+<p>All named people, for a "pick someone else" list or a full re-sync of your mapping.{% if lim.changes %}
+<code>changes_cursor</code> is the position of the newest change, read <b>before</b> the list: after a full re-sync,
+continue <a href="#changes">the change feed</a> from it.{% endif %}</p>
+{% set c_curl %}
+curl -sS "{{ base }}/v1/people" -H "X-API-Key: $FACE_API_KEY"
+{% endset %}
+{% set c_php %}
+$people = Http::withHeaders(['X-API-Key' => config('services.face_api.key')])
+    ->get('{{ base }}/v1/people')->throw()->json('people');
+{% endset %}
+{% set c_py %}
+people = httpx.get("{{ base }}/v1/people", headers={"X-API-Key": os.environ["FACE_API_KEY"]}).json()["people"]
+{% endset %}
+{% set c_node %}
+const { people } = await (await fetch("{{ base }}/v1/people", {
+  headers: { "X-API-Key": process.env.FACE_API_KEY },
+})).json();
+{% endset %}
+{{ m.code([('curl', 'curl', c_curl), ('php', 'PHP', c_php), ('python', 'Python', c_py), ('node', 'Node', c_node)]) }}
+{% set c %}
+{"people": [{"person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "name": "Jane Example", "face_count": 42}],
+ "count": 1{% if lim.changes %}, "changes_cursor": "pc_41"{% endif %}}
+{% endset %}{{ m.block(c) }}
+{% endif %}
+
+{% if lim.changes %}
+<h2 id="changes"><span class="method get">GET</span> /v1/people/changes</h2>
+<p>What the archive's curators changed since your last sync, in order. Query: <code>since</code> (a cursor
+<code>pc_…</code>, or an ISO-8601 time with zone) and <code>limit</code> (1–5000, default 500). Call it nightly with the
+<code>next_cursor</code> of the previous call; the first time, take <code>changes_cursor</code> from
+<a href="#people"><code>GET /v1/people</code></a>. Always store <code>next_cursor</code> (also when
+<code>changes</code> is empty) and call again at once while <code>has_more</code> is true.</p>
+{% set c_curl %}
+curl -sS "{{ base }}/v1/people/changes?since=$CURSOR&limit=1000" -H "X-API-Key: $FACE_API_KEY"
+{% endset %}
+{% set c_php %}
+do {
+    $page = Http::withHeaders(['X-API-Key' => config('services.face_api.key')])
+        ->get('{{ base }}/v1/people/changes', ['since' => $cursor, 'limit' => 1000])
+        ->throw()->json();
+    foreach ($page['changes'] as $event) { /* apply it: see the integration guide */ }
+    $cursor = $page['next_cursor'];   // save it after each page
+} while ($page['has_more']);
+{% endset %}
+{% set c_py %}
+while True:
+    page = httpx.get("{{ base }}/v1/people/changes", params={"since": cursor, "limit": 1000},
+                     headers={"X-API-Key": os.environ["FACE_API_KEY"]}, timeout=60).raise_for_status().json()
+    for event in page["changes"]:
+        apply(event)
+    cursor = page["next_cursor"]  # save it after each page
+    if not page["has_more"]:
+        break
+{% endset %}
+{% set c_node %}
+let page;
+do {
+  const url = `{{ base }}/v1/people/changes?since=${encodeURIComponent(cursor)}&limit=1000`;
+  page = await (await fetch(url, { headers: { "X-API-Key": process.env.FACE_API_KEY } })).json();
+  for (const event of page.changes) await apply(event);
+  cursor = page.next_cursor; // save it after each page
+} while (page.has_more);
+{% endset %}
+{{ m.code([('curl', 'curl', c_curl), ('php', 'PHP', c_php), ('python', 'Python', c_py), ('node', 'Node', c_node)]) }}
+{% set c %}
+{
+  "changes": [
+    {"cursor": "pc_42", "type": "created", "at": "2026-01-31T10:05:00Z", "after": "2026-01-31T10:00:00Z",
+     "person_id": "0b7e3b7c-1a52-4d0e-9a9e-2f7c9a1d5e33", "name": "John Example"},
+    {"cursor": "pc_43", "type": "faces_moved", "at": "2026-01-31T10:05:00Z", "after": "2026-01-31T10:00:00Z",
+     "from_person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "from_name": "Jane Example",
+     "to_person_id": "0b7e3b7c-1a52-4d0e-9a9e-2f7c9a1d5e33", "to_name": "John Example", "count": 212},
+    {"cursor": "pc_44", "type": "merged", "at": "2026-01-31T10:05:00Z", "after": "2026-01-31T10:00:00Z",
+     "from_person_id": "9a2d4c1e-0f3b-4e8a-b6d2-7c1e5a9f3b20", "from_name": "J. Example",
+     "into_person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "into_name": "Jane Example", "faces": 40}
+  ],
+  "next_cursor": "pc_44", "has_more": false, "resync_required": false,
+  "tracking_since": "2026-01-01T00:00:00Z", "checked_at": "2026-01-31T10:05:00Z"
+}
+{% endset %}{{ m.block(c) }}
+<table class="kv">
+  <tr><th><code>type</code></th><th>Fields</th><th>Meaning</th></tr>
+  <tr><td><code>created</code></td><td><code>person_id</code>, <code>name</code></td><td>a person entered the named set: named for the first time, un-hidden, or named again after its name was cleared</td></tr>
+  <tr><td><code>renamed</code></td><td><code>person_id</code>, <code>old_name</code>, <code>new_name</code></td><td>the name changed</td></tr>
+  <tr><td><code>faces_moved</code></td><td><code>from_person_id</code>, <code>from_name</code>, <code>to_person_id</code>, <code>to_name</code>, <code>count</code></td><td>a split or correction: <code>count</code> faces of a named person now belong to another person (<code>to_person_id</code> <code>null</code> = unassigned; <code>to_name</code> <code>null</code> = not a named person yet)</td></tr>
+  <tr><td><code>merged</code></td><td><code>from_person_id</code>, <code>from_name</code>, <code>into_person_id</code>, <code>into_name</code>, <code>faces</code></td><td>the person no longer exists; its faces went to <code>into_person_id</code></td></tr>
+  <tr><td><code>deleted</code></td><td><code>person_id</code>, <code>name</code>, <code>reason</code></td><td><code>reason</code>: <code>deleted</code>, <code>hidden</code> or <code>unnamed</code> (name cleared)</td></tr>
+</table>
+<p><b>Guarantees:</b> events are in order and each appears once. The archive is checked every {{ lim.changes_minutes }}
+minutes, so <code>at</code> is when a change was seen and it happened after <code>after</code>; several edits of a person
+in one window show as one net change. Only named, visible people are tracked; changes before
+<code>tracking_since</code> are not known. If <code>resync_required</code> is <code>true</code> (your cursor is older than
+the {{ lim.changes_days }}-day log), re-sync fully from <a href="#people"><code>GET /v1/people</code></a> and
+<a href="#resolve"><code>POST /v1/people/resolve</code></a>, then continue from <code>changes_cursor</code>. What to do
+with each event: <a href="/docs/integration#sync">Integration guide → Nightly sync</a>.</p>
+{% endif %}
+
+{% if lim.people %}
+<h2 id="resolve"><span class="method post">POST</span> /v1/people/resolve</h2>
+<p>Where stored person ids stand <b>now</b>: JSON <code>{"person_ids": [...]}</code>, up to 1000 ids. Use it for a full
+re-sync of your mapping, and whenever an id you hold no longer appears in <code>GET /v1/people</code>.</p>
+{% set c_curl %}
+curl -sS "{{ base }}/v1/people/resolve" -H "X-API-Key: $FACE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"person_ids": ["9a2d4c1e-0f3b-4e8a-b6d2-7c1e5a9f3b20", "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10"]}'
+{% endset %}
+{% set c_php %}
+$resolved = Http::withHeaders(['X-API-Key' => config('services.face_api.key')])
+    ->post('{{ base }}/v1/people/resolve', ['person_ids' => $ids])
+    ->throw()->json('people');
+{% endset %}
+{% set c_py %}
+r = httpx.post("{{ base }}/v1/people/resolve", json={"person_ids": ids},
+               headers={"X-API-Key": os.environ["FACE_API_KEY"]}, timeout=60)
+resolved = {p["person_id"]: p for p in r.raise_for_status().json()["people"]}
+{% endset %}
+{% set c_node %}
+const res = await fetch("{{ base }}/v1/people/resolve", {
+  method: "POST",
+  headers: { "X-API-Key": process.env.FACE_API_KEY, "Content-Type": "application/json" },
+  body: JSON.stringify({ person_ids: ids }),
+});
+const { people: resolved } = await res.json();
+{% endset %}
+{{ m.code([('curl', 'curl', c_curl), ('php', 'PHP', c_php), ('python', 'Python', c_py), ('node', 'Node', c_node)]) }}
+{% set c %}
+{"people": [
+  {"person_id": "9a2d4c1e-0f3b-4e8a-b6d2-7c1e5a9f3b20", "status": "merged",
+   "current_person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "name": "Jane Example",
+   "merged_via": ["6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10"], "target_status": "current"},
+  {"person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "status": "current",
+   "current_person_id": "6f1c1f0e-8d0a-4c55-9d43-4f0b1d1f2a10", "name": "Jane Example"}
+], "change_log": true}
+{% endset %}{{ m.block(c) }}
+<p><code>status</code>: <code>current</code> (named, visible), <code>merged</code> (followed through up to 10 merges to
+<code>current_person_id</code>; <code>target_status</code> says whether that one is current, hidden or unnamed),
+<code>hidden</code>, <code>unnamed</code>, <code>deleted</code> or <code>unknown</code> (never seen).</p>
+{% endif %}
+
+<h2 id="health"><span class="method get">GET</span> /healthz</h2>
+<p>No key needed. <code>200 {"status":"ok"}</code> while the service runs; use it for your own uptime check.</p>
+
+<h2 id="limits">Limits and rate limits</h2>
+<table class="kv">
+  <tr><th>Limit</th><th>Value</th></tr>
+  <tr><td>Photo size</td><td>up to <b>{{ lim.max_mb }} MiB</b> per request (a gateway in front may stop larger bodies
+    earlier); send a web-size copy: 2000–3000 px is plenty, faces are detected on a {{ lim.max_edge }} px version anyway</td></tr>
+  <tr><td>Pixels</td><td>up to <b>{{ lim.max_mp }} megapixels</b>, checked before decoding</td></tr>
+  <tr><td>Formats</td><td>JPEG, PNG, WebP, HEIC/HEIF. Animated images: first frame only</td></tr>
+  <tr><td>Rate</td><td><b>{{ lim.rate }} requests/minute</b> per key (burst {{ lim.burst }}) unless your key has its own
+    limit; a batch counts one per photo. A gateway in front may add a per-IP limit</td></tr>
+  <tr><td>Time</td><td>usually 1–3 s per photo; allow a <b>120 s</b> client timeout. A photo waits at most
+    {{ lim.queue_timeout }} s for a free slot (then <code>503</code>) and {{ lim.ml_timeout }} s for face detection</td></tr>
+  <tr><td>Verify</td><td>at most {{ lim.verify_claims }} claimed people per photo; at most {{ lim.verify_batch }} photos per batch</td></tr>
+  {% if lim.people %}<tr><td>Resolve</td><td>at most 1000 ids per call</td></tr>{% endif %}
+  {% if lim.changes %}<tr><td>Change feed</td><td>up to 5000 events per page; kept {{ lim.changes_days }} days</td></tr>{% endif %}
+</table>
+
+<h2 id="errors">Errors</h2>
+<p>Errors are JSON: <code>{"error": {"code": "...", "message": "..."}}</code>. <code>429</code> and <code>503</code>
+carry a <code>Retry-After</code> header (seconds).</p>
+{% set c %}
+HTTP/1.1 429 Too Many Requests
+Retry-After: 4
+Content-Type: application/json
+
+{"error": {"code": "rate_limited", "message": "too many requests"}}
+{% endset %}{{ m.block(c) }}
+<table class="kv">
+  <tr><th>Status</th><th>Code</th><th>Meaning</th><th>What to do</th></tr>
+  <tr><td>400</td><td><code>bad_request</code>, <code>invalid_image</code></td><td>no <code>image</code> field, bad query or cursor, missing <code>person_id</code>, or a file that is not a valid image</td><td>fix the request; do not retry</td></tr>
+  <tr><td>401</td><td><code>unauthorized</code></td><td>key missing, wrong, revoked or expired</td><td>check the key; alert your maintainers; do not retry in a loop</td></tr>
+  <tr><td>404</td><td><code>not_found</code></td><td>an endpoint that is not enabled on this service</td><td>—</td></tr>
+  <tr><td>413</td><td><code>too_large</code>, <code>invalid_image</code></td><td>over {{ lim.max_mb }} MiB or {{ lim.max_mp }} megapixels</td><td>send a smaller copy</td></tr>
+  <tr><td>415</td><td><code>invalid_image</code></td><td>not JPEG, PNG, WebP or HEIC</td><td>convert first</td></tr>
+  <tr><td>429</td><td><code>rate_limited</code></td><td>too many requests for this key</td><td>wait <code>Retry-After</code> seconds</td></tr>
+  <tr><td>502</td><td><code>upstream</code></td><td>face detection or the search failed</td><td>retry later with backoff</td></tr>
+  <tr><td>503</td><td><code>busy</code>, <code>not_ready</code></td><td>too many photos in progress, or the service is starting or not ready</td><td>wait <code>Retry-After</code>, retry with backoff</td></tr>
+</table>
+
+<h2 id="retries">Retries: a full example</h2>
+<p>Retry only <code>429</code>, <code>502</code> and <code>503</code>, a few times, honouring <code>Retry-After</code>.
+Never retry <code>400</code>, <code>401</code>, <code>413</code> or <code>415</code>.</p>
+{% set c_curl %}
+# the key goes into a header file, never on the command line
+printf 'X-API-Key: %s\n' "$(cat face-api.key)" > .face-api-header && chmod 600 .face-api-header
+for attempt in 1 2 3; do
+  code=$(curl -sS -o result.json -D headers.txt -w '%{http_code}' -H @.face-api-header \
+         -F image=@event.jpg "{{ base }}/v1/identify?candidates=3")
+  case "$code" in
+    429|502|503) wait=$(awk 'tolower($1)=="retry-after:" {print $2+0}' headers.txt); sleep "${wait:-$((attempt * 5))}";;
+    *) break;;
+  esac
+done
+echo "HTTP $code"; cat result.json
+{% endset %}
+{% set c_php %}
+// config/services.php: 'face_api' => ['url' => env('FACE_API_URL'), 'key' => env('FACE_API_KEY')]
+// Run in a queued job, never in a page request.
+$response = Http::withHeaders(['X-API-Key' => config('services.face_api.key')])
+    ->timeout(120)
+    ->retry(3, fn (int $attempt, \Throwable $e) => (int) ($e->response?->header('Retry-After') ?: 5 * $attempt) * 1000,
+        fn (\Throwable $e) => $e instanceof \Illuminate\Http\Client\RequestException
+            && in_array($e->response->status(), [429, 502, 503]), throw: false)
+    ->attach('image', $jpegBytes, 'photo.jpg')
+    ->post(rtrim(config('services.face_api.url'), '/').'/v1/identify?candidates=3');
+
+if ($response->successful()) {
+    foreach ($response->json('faces') as $face) {
+        // store as a PENDING suggestion; staff confirm before anything is published
+    }
+}
+{% endset %}
+{% set c_py %}
+import os, time, httpx
+
+URL = "{{ base }}"
+KEY = os.environ["FACE_API_KEY"]
+
+def identify(path: str, attempts: int = 3) -> dict:
+    with httpx.Client(timeout=120, headers={"X-API-Key": KEY}) as client:
+        for attempt in range(1, attempts + 1):
+            with open(path, "rb") as fh:
+                r = client.post(f"{URL}/v1/identify", params={"candidates": 3}, files={"image": fh})
+            if r.status_code in (429, 502, 503) and attempt < attempts:
+                time.sleep(int(r.headers.get("Retry-After", 5 * attempt)))
+                continue
+            r.raise_for_status()
+            return r.json()
+
+for face in identify("event.jpg")["faces"]:
+    print(face["box"], face["name"] or "unknown", face["distance"])
+{% endset %}
+{% set c_node %}
+import { readFile } from "node:fs/promises";
+
+const URL = "{{ base }}";
+const KEY = process.env.FACE_API_KEY;
+
+export async function identify(path, attempts = 3) {
+  for (let attempt = 1; ; attempt++) {
+    const form = new FormData();
+    form.append("image", new Blob([await readFile(path)]), "photo.jpg");
+    const res = await fetch(`${URL}/v1/identify?candidates=3`, {
+      method: "POST",
+      headers: { "X-API-Key": KEY },
+      body: form,
+      signal: AbortSignal.timeout(120_000),
+    });
+    if ([429, 502, 503].includes(res.status) && attempt < attempts) {
+      const wait = Number(res.headers.get("retry-after") ?? 5 * attempt);
+      await new Promise((r) => setTimeout(r, wait * 1000));
+      continue;
+    }
+    if (!res.ok) throw new Error(`face api ${res.status}: ${await res.text()}`);
+    return res.json();
+  }
+}
+{% endset %}
+{{ m.code([('curl', 'curl', c_curl), ('php', 'PHP', c_php), ('python', 'Python', c_py), ('node', 'Node', c_node)]) }}
+
+<h2 id="fields">Field reference</h2>
+<p class="muted">Every public endpoint, parameter and field, generated from the OpenAPI document of this version
+({{ spec.info.version }}).</p>
+{% for op in ops %}
+<section class="op" id="ref-{{ op.id }}">
+  <h3><span class="method {{ op.method | lower }}">{{ op.method }}</span> <code>{{ op.path }}</code>
+    {% if op.auth %}<span class="chip">API key</span>{% else %}<span class="chip">no key</span>{% endif %}</h3>
+  <p>{{ op.summary }}</p>
+  {% if op.parameters %}
+  <div class="scroll"><table class="kv">
+    <tr><th>Parameter</th><th>In</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    {% for p in op.parameters %}<tr><td><code>{{ p.name }}</code></td><td>{{ p.in }}</td><td>{{ p.type }}</td><td>{{ "yes" if p.required else "no" }}</td><td class="wrap">{{ p.description | inline_code }}</td></tr>{% endfor %}
+  </table></div>
+  {% endif %}
+  {% if op.body %}
+  <ul>{% for b in op.body %}<li>Body <code>{{ b.media }}</code>{% for f in b.fields %}: field <code>{{ f.name }}</code> ({{ f.type }}){% if f.description %}, {{ f.description | inline_code }}{% endif %}{% endfor %}</li>{% endfor %}</ul>
+  {% endif %}
+  {% for r in op.responses %}
+  <details {{ 'open' if r.status == '200' and r.fields }}>
+    <summary><b>{{ r.status }}</b> {{ r.description }}{% if r.media %} · <code>{{ r.media }}</code>{% endif %}</summary>
+    {% if r.fields %}
+    <div class="scroll"><table class="kv">
+      <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+      {% for f in r.fields %}<tr><td class="d{{ f.depth }}"><code>{{ f.name }}</code></td><td class="wrap">{{ f.type }}</td><td>{{ "yes" if f.required else "" }}</td><td class="wrap">{{ f.description | inline_code }}</td></tr>{% endfor %}
+    </table></div>
+    {% endif %}
+  </details>
+  {% endfor %}
+</section>
+{% endfor %}
+</article>
+</div>
+{% endblock %}

@@ -5,6 +5,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added (open developer docs)
+- `FACE_API_OPEN_DOCS=true` (default off): the API serves login-free, read-only docs for app developers:
+  `GET /docs` (API reference with curl/PHP/Python/Node examples, main-subject fields, verify's `subject` option,
+  limits, errors, retries and a generated field reference) and `GET /docs/integration` (integration guide: member
+  mapping, confirmation, profile pages, nightly sync from the change feed, re-checking with verify, privacy), with
+  assets under `/docs/static/`. Strict CSP, no inline code, no admin content. The base URL is
+  `FACE_API_DOCS_BASE_URL`; with the flag on, `GET /openapi.json` lists it in `servers`.
+- Responses keep a `Cache-Control` a route sets itself (only the docs do); everything else is still `no-store`.
+
 ### Changed (labeler: faster named-neighbour vote)
 - The vote finds each unnamed face's nearest named face in batched matrix products (4,096 faces x 16,384 named faces
   per product) instead of one small product per cluster, which read the whole named-face matrix once per cluster and
