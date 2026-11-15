@@ -239,6 +239,8 @@ class State:
                 settings.knn,
                 max_faces=settings.face_cache_max_faces,
                 idle_seconds=settings.face_cache_idle_seconds,
+                faces_refresh_seconds=settings.face_cache_faces_refresh_seconds,
+                dtype=settings.face_cache_dtype,
             )
             if settings.face_cache
             else None
@@ -364,6 +366,25 @@ class State:
         m.STAGE.labels("ml").observe(time.perf_counter() - t1)
         return img, faces
 
+    @property
+    def warm(self) -> bool:
+        """Ready to serve searches fast: the face cache is loaded (or not needed: disabled, lazy, SQL fallback)."""
+        f = self.faces
+        return f is None or f.lazy or f.ready or self.s.face_cache_sql_fallback
+
+    async def _use_cache(self) -> bool:
+        """True: search the face cache. False: exact SQL (no cache configured, or the fallback is allowed while it
+        loads). Otherwise 503 busy at once: the exact SQL search over every named face can take longer than the
+        statement timeout on a busy database, and readiness keeps traffic away until the cache is loaded."""
+        if self.faces is None:
+            return False
+        if await self.faces.use():
+            return True
+        if self.s.face_cache_sql_fallback:
+            return False
+        m.REJECTED.labels("cache_loading").inc()
+        raise HttpError(503, "busy", "the face index is loading, retry in a few seconds", {"Retry-After": "10"})
+
     async def _identify_faces(self, img, faces, candidates, include_unnamed, rid, log_faces, subject=False) -> dict:
         s = self.s
         state = self
@@ -372,11 +393,13 @@ class State:
         embeddings = [f.embedding for f in faces]
         try:
             same_person = None
-            if state.faces is not None and not include_unnamed and await state.faces.use():
+            if not include_unnamed and await self._use_cache():
                 neighbours = await state.faces.nearest(embeddings)  # in memory, milliseconds
                 same_person = same_person_rule(state.faces.snap, s.same_name_max_distance)
-            else:  # cache not loaded yet, or test mode: exact search in the database
+            else:  # no cache configured, SQL fallback allowed, or test mode: exact search in the database
                 neighbours = await state.db.nearest(embeddings, include_unnamed=include_unnamed)
+        except HttpError:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise db_failure(exc, rid, "face search failed") from exc
         m.STAGE.labels("db").observe(time.perf_counter() - t2)
@@ -493,13 +516,15 @@ class State:
             resolved = await ch.resolve(self.db, self.store if self.tracker else None, claims)
             targets = sorted({r["current_person_id"] for r in resolved.values() if _comparable(r)})
             same_person = None
-            if self.faces is not None and await self.faces.use():
+            if await self._use_cache():
                 dists = await self.faces.distances(embeddings, targets)
                 neighbours = await self.faces.nearest(embeddings)
                 same_person = same_person_rule(self.faces.snap, s.same_name_max_distance)
             else:
                 dists = await self.db.claim_distances(embeddings, targets, s.face_cache_per_person)
                 neighbours = await self.db.nearest(embeddings)
+        except HttpError:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise db_failure(exc, rid, "verification failed") from exc
         m.STAGE.labels("db").observe(time.perf_counter() - t2)
@@ -800,9 +825,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/readyz")
     async def readyz(request: Request):
         state: State = request.app.state.face
-        if state.ready:
+        if state.ready and state.warm:
             return {"status": "ready"}
-        return JSONResponse({"status": "not ready"}, status_code=503)
+        reason = state.reason if not state.ready else "face cache loading"
+        return JSONResponse({"status": "not ready", "reason": reason}, status_code=503)
 
     @app.post("/v1/identify")
     async def identify(request: Request):

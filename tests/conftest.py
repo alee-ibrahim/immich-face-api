@@ -41,4 +41,5 @@ def settings():
         rate_limit_per_minute=600,
         rate_limit_burst=50,
         metrics_port=0,
+        face_cache_sql_fallback=True,  # most tests use a fake database; test_facecache covers the cache-only path
     )

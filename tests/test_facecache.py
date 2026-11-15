@@ -274,3 +274,57 @@ def test_lazy_cache_loads_on_use_and_unloads_when_idle():
         assert not await eager.use()
 
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_cold_cache_fails_fast_and_is_not_ready(settings):
+    """Until the face cache is loaded: /readyz 503 (no traffic) and identify 503 busy at once, no slow SQL search."""
+    app, c = make(dataclasses.replace(settings, face_cache_sql_fallback=False))
+    st = app.state.face
+
+    class NoDB(FakeDB):
+        async def nearest(self, embeddings, include_unnamed=False):
+            raise AssertionError("exact SQL search used while the cache loads")
+
+    st.db = NoDB([])
+    st.faces = FaceCache(SigDB(), per_person=10, refresh_seconds=60, knn=5)
+    st.ml = FakeML([dataclasses.replace(f, embedding=json.dumps([1.0] * DIM)) for f in FACES])
+    st.ready = True
+    r = await c.get("/readyz")
+    assert r.status_code == 503 and r.json()["reason"] == "face cache loading"
+    r = await c.post("/v1/identify", headers=AUTH, content=synthetic_jpeg())
+    assert r.status_code == 503 and r.json()["error"]["code"] == "busy" and r.headers["retry-after"] == "10"
+    await st.faces.refresh()
+    assert (await c.get("/readyz")).status_code == 200
+    r = await c.post("/v1/identify", headers=AUTH, content=synthetic_jpeg())
+    assert r.status_code == 200
+
+
+def test_vectorised_decode_matches_per_row():
+    rng = np.random.default_rng(9)
+    vs = [rng.normal(size=DIM).astype(np.float32) for _ in range(50)]
+    rows = [(f"p{i % 3}", "N", pg_binary(v)) for i, v in enumerate(vs)]
+    text_rows = [(p, n, "[" + ",".join(repr(float(x)) for x in v) + "]") for (p, n, _), v in zip(rows, vs, strict=True)]
+    a, b = build(rows), build(text_rows)  # binary: one numpy call; text: row by row
+    assert np.array_equal(a.vectors, b.vectors) and np.array_equal(a.person_idx, b.person_idx)
+    f32 = build(rows, dtype=np.float32)
+    assert f32.vectors.dtype == np.float32 and np.allclose(f32.vectors, a.vectors, atol=2e-3)
+    q = [json.dumps([float(x) for x in vs[7]])]
+    assert search(f32, q, k=3)[0][0].distance < 1e-5 and search(a, q, k=3)[0][0].person_id == "p1"
+
+
+def test_face_only_changes_rebuild_less_often():
+    async def run():
+        db = SigDB()
+        db.sig = (1, "people-t1", "faces-t1")
+        cache = FaceCache(db, per_person=10, refresh_seconds=60, knn=5, faces_refresh_seconds=900)
+        assert await cache.refresh() and db.loads == 1
+        db.sig = (2, "people-t1", "faces-t2")  # only faces changed: wait
+        assert not await cache.refresh() and db.loads == 1
+        db.sig = (3, "people-t2", "faces-t2")  # a person named/renamed: now
+        assert await cache.refresh() and db.loads == 2
+        db.sig = (4, "people-t2", "faces-t3")
+        cache.snap.loaded_at -= 901  # older than faces_refresh_seconds: rebuild
+        assert await cache.refresh() and db.loads == 3
+
+    asyncio.run(run())
