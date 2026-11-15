@@ -173,7 +173,9 @@ class Settings:
     oidc_admin_claim: str = ""
     oidc_admin_values: tuple[str, ...] = ()
     admin_token: str = field(default="", repr=False)
-    docs_base_url: str = ""  # API base URL shown in the admin docs; default: the request's own host
+    docs_base_url: str = ""  # API base URL shown in the docs (admin and open docs); default: the request's own host
+    # open (login-free), read-only docs served by the API itself: GET /docs, /docs/integration, /docs/static/* (no key needed)
+    open_docs: bool = False
 
     # request log in the store (needs FACE_API_STORE_URL): per identify request what was asked and what was found
     # (app, image size, faces, matched names, distances, status), no images. See README "Request log and face crops".
@@ -302,6 +304,7 @@ class Settings:
             oidc_admin_values=admin_values,
             admin_token=_secret("ADMIN_TOKEN") or "",
             docs_base_url=(_env("DOCS_BASE_URL", "") or "").rstrip("/"),
+            open_docs=_bool("OPEN_DOCS", False),
             request_log=_bool("REQUEST_LOG", True),
             request_log_retention_days=_int("REQUEST_LOG_RETENTION_DAYS", 90, 1, 3650),
             store_crops=_choice("STORE_CROPS", "none", ("none", "unknown", "all")),

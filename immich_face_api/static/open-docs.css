@@ -1,0 +1,8 @@
+/* open docs (served at /docs/static/docs.css on top of base.css) */
+.open-docs header nav { flex: 1; }
+.open-docs footer code { font-size: 11.5px; }
+.open-docs .callout { border-left: 3px solid var(--accent); padding: 10px 14px; background: var(--panel);
+  border-radius: 6px; margin: 12px 0; max-width: 78ch; }
+.open-docs .callout.warn { border-left-color: var(--warn); }
+.open-docs ol.steps li { margin-bottom: 6px; }
+.open-docs .toc .sub { padding-left: 10px; font-size: 12.5px; }
