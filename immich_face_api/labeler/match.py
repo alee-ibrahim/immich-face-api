@@ -456,6 +456,7 @@ def named_vote(
     owner_of = np.concatenate([np.full(len(named[p]), i) for i, p in enumerate(npids)])
     lookalike = lookalike_names(named, names, t.vote_lookalike_distance) if t.vote_lookalike_distance > 0 else {}
     other_cache: dict[str, np.ndarray] = {}
+    tokens_of = {n: name_tokens(n) for n in set(names[p] for p in npids)}
     idents: dict[str, Identity] = {}
     out = []
     for pid, emb in unnamed.items():
@@ -515,7 +516,7 @@ def named_vote(
         prop.vote = (votes[top], len(emb), len(support))
         if t.vote_min_name_gap > 0 or top in lookalike:
             if top not in other_cache:
-                other_cache[top] = np.array([not same_person_name(names[p], top) for p in npids])[owner_of]
+                other_cache[top] = _other_mask(top, npids, names, tokens_of)[owner_of]
             gap, runner = _name_gap(emb[sel], best_d[sel], nmat, owner_of, npids, names, other_cache[top])
             need = t.vote_min_name_gap
             if top in lookalike:
@@ -557,6 +558,20 @@ def lookalike_names(named: dict[str, np.ndarray], names: dict[str, str], max_dis
             continue
         if a not in out or d[i, j] < out[a][1]:
             out[a] = (b, round(float(d[i, j]), 3))
+    return out
+
+
+def _other_mask(top: str, npids: list[str], names: dict[str, str], tokens_of: dict[str, set]) -> np.ndarray:
+    """Per named person: True when it is another person than ``top`` (``same_person_name`` is only evaluated for
+    names that share a name word with ``top``; all others are different people)."""
+    tt = tokens_of.get(top) or name_tokens(top)
+    same: dict[str, bool] = {}
+    out = np.ones(len(npids), dtype=bool)
+    for i, p in enumerate(npids):
+        n = names[p]
+        if n not in same:
+            same[n] = bool(tt & tokens_of[n]) and same_person_name(n, top) if n != top else True
+        out[i] = not same[n]
     return out
 
 
