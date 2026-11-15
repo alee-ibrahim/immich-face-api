@@ -132,6 +132,9 @@ over the plain variable.
 | `FACE_API_FACE_CACHE` | `true` | search named faces in memory (see [Matching](#the-matching-algorithm)) |
 | `FACE_API_FACE_CACHE_PER_PERSON` | `100` | faces cached per person |
 | `FACE_API_FACE_CACHE_REFRESH_SECONDS` | `300` | how often to check named faces for changes |
+| `FACE_API_FACE_CACHE_MAX_FACES` | `1000000` | total cap (~1 GiB); above it the per-person cap is lowered; `0` = none |
+| `FACE_API_FACE_CACHE_IDLE_SECONDS` | `0` | API: `0` = always loaded; > 0 = load on first use, drop after this idle time |
+| `FACE_API_ADMIN_FACE_CACHE_IDLE_SECONDS` | `1800` | admin UI ("Try it"): same, lazy by default; `0` = always loaded |
 | `FACE_API_MAX_CANDIDATES` | `5` | cap for `?candidates=` |
 | `FACE_API_AMBIGUITY_MARGIN` | `0.03` | runner-up this close → `ambiguous: true` |
 | `FACE_API_SAME_NAME_MAX_DISTANCE` | `0.6` | same-name people with centroids this close are one split person, not an ambiguity; `0` = off |
@@ -579,9 +582,23 @@ float16 matrix and searches it with one matrix product (numpy):
 - **Refresh:** every `FACE_API_FACE_CACHE_REFRESH_SECONDS` (300) a cheap check (count and newest change of named people
   and faces) runs. The matrix is rebuilt only when something changed, so a newly named person is found within about
   5 minutes.
+- **Total cap:** at most `FACE_API_FACE_CACHE_MAX_FACES` faces (default 1,000,000, about 1 GiB). Above it the
+  per-person cap is lowered until the total fits (logged as `face cache capped`), so memory never grows without bound.
 - **Cost:** about 1 KiB per cached face per process. A real library with 641 named people and 56,663 named faces caches
-  23,152 faces (about 23 MiB). Ten detected faces against 30,000 cached faces take about 40 ms; against 300,000 cached
-  faces (294 MiB) about 0.4 s.
+  23,152 faces (about 23 MiB); one with 4,121 named people and 1.96 M named faces caches 113,960 (111 MiB, median 4
+  faces per person). Ten detected faces against 30,000 cached faces take about 40 ms; against 300,000 cached faces
+  (294 MiB) about 0.4 s.
+- **Memory during a rebuild:** faces are counted per person first (no embeddings), the new float16 matrix is allocated
+  once at that size, and embeddings are streamed in batches of 2,048 straight into it; the old matrix keeps serving
+  until the swap. Peak ≈ process (~150 MiB) + 2 × 1 KiB per cached face. Size the memory limit for that plus image
+  decoding (a 50 MP upload is ~150 MB): e.g. 300,000 cached faces → ~0.75 GiB peak, 550,000 → ~1.3 GiB.
+  (Earlier builds held all fetched rows and float32 copies during a rebuild, ~8 KiB per cached face.)
+- **Admin UI:** the admin process needs the cache only for *Try it*; it loads on first use and is dropped after
+  `FACE_API_ADMIN_FACE_CACHE_IDLE_SECONDS` without use.
+- **Metrics:** `face_api_face_cache_faces`, `face_api_face_cache_people`, `face_api_face_cache_bytes`,
+  `face_api_face_cache_per_person`, `face_api_face_cache_loaded_timestamp_seconds`, `face_api_face_cache_refresh_seconds`
+  (histogram), `face_api_face_cache_refresh_errors_total`. Alert on the container's working set against its memory
+  limit (e.g. > 85 %), since a rebuild is a short spike.
 - **Trade-off:** "nearest face wins" is kept, over the cached faces. For people with more faces than the cap, the
   nearest face can be one outside the sample. A sample of up to 100 faces of the same person almost always holds one
   about as close.

@@ -227,7 +227,14 @@ class State:
         self.ml = MLClient(settings.ml_url, settings.face_model, settings.min_score, settings.ml_timeout)
         self.ml_slots = asyncio.Semaphore(settings.max_concurrent_ml)
         self.faces = (
-            FaceCache(self.db, settings.face_cache_per_person, settings.face_cache_refresh_seconds, settings.knn)
+            FaceCache(
+                self.db,
+                settings.face_cache_per_person,
+                settings.face_cache_refresh_seconds,
+                settings.knn,
+                max_faces=settings.face_cache_max_faces,
+                idle_seconds=settings.face_cache_idle_seconds,
+            )
             if settings.face_cache
             else None
         )
@@ -336,7 +343,7 @@ class State:
         embeddings = [f.embedding for f in faces]
         try:
             same_person = None
-            if state.faces is not None and state.faces.ready and not include_unnamed:
+            if state.faces is not None and not include_unnamed and await state.faces.use():
                 neighbours = await state.faces.nearest(embeddings)  # in memory, milliseconds
                 same_person = same_person_rule(state.faces.snap, s.same_name_max_distance)
             else:  # cache not loaded yet, or test mode: exact search in the database
@@ -447,7 +454,7 @@ class State:
             resolved = await ch.resolve(self.db, self.store if self.tracker else None, claims)
             targets = sorted({r["current_person_id"] for r in resolved.values() if _comparable(r)})
             same_person = None
-            if self.faces is not None and self.faces.ready:
+            if self.faces is not None and await self.faces.use():
                 dists = await self.faces.distances(embeddings, targets)
                 neighbours = await self.faces.nearest(embeddings)
                 same_person = same_person_rule(self.faces.snap, s.same_name_max_distance)
