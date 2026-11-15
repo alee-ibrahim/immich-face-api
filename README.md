@@ -1064,6 +1064,21 @@ More source kinds:
   `vote_lookalike_min_gap` (0.10) when the voted name has a known look-alike (another person's name whose faces'
   centroid is within `vote_lookalike_distance`, 0.40). Names count as the same person only when they share a key or
   are compatible spellings with at least two name words each. Set the values to 0 to switch a check off.
+  **Anchored vote** (no chains): only *anchors* vote: people named by a person, or by the labeler from a folder,
+  portrait, roster or curated override (from the audit log). A person the labeler named from the vote itself votes
+  only when its centroid is within `vote_anchor_distance` (0.45) of an anchor with the same name; 0 = never. Without
+  this, one wrongly voted cluster (for example a cluster that mixes two look-alike people) passes the name on to the
+  clusters that are near it, and those to theirs. **Review holds** on high and medium votes: a *mixed cluster*
+  (median distance of its sampled faces to their centroid >= `vote_max_spread`, 0.40, with at least
+  `vote_spread_min_faces` sampled; or photos in two eras at least `vote_era_gap_years`, 8, apart with
+  `vote_era_min_share`, 0.2, of the photos on each side), and *folder evidence*: person-named folders whose person
+  includes at least `vote_folder_min_faces` (2) of the cluster's faces under a name that does not fit the vote. The
+  era check needs `SELECT ("fileCreatedAt") ON asset` (examples/labeler/roles.sql); without it, it is skipped.
+  **Cleared for review**: a wrong name taken off a person with an audit row whose note starts with
+  `cleared-for-review` keeps the person out of every automatic write (the labeler never names a person twice) and
+  holds its proposals in the report and worklist, so curators decide. `recheck-votes` (read-only) re-checks every
+  person named from the vote so far with the anchored rule (anchors only) and the review holds, and lists suspects
+  with the distance to the nearest anchor of their name, their photo years and folder evidence (report + CSV).
   Cost of the vote: exact nearest-face search, about
   (unnamed sampled faces x named sampled faces x 512) x 2 floating-point operations in batched matrix products, so it
   grows with both and uses as many cores as the BLAS library is given (`OPENBLAS_NUM_THREADS`; set it to the CPU
@@ -1154,6 +1169,7 @@ python -m immich_face_api.labeler undo --copies --run <share-names-run>   # or -
 python -m immich_face_api.labeler worklist --top 200        # biggest unnamed people the labeler will not name
 python -m immich_face_api.labeler tidy-names [--apply]      # remove titles from owner names (below)
 python -m immich_face_api.labeler tidy-names --copies [--apply]   # ... and from copies that follow the owner name
+python -m immich_face_api.labeler recheck-votes [--top 2000]   # read-only: re-check names written from the vote
 python -m immich_face_api.labeler status
 ```
 

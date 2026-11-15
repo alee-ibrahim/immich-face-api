@@ -14,6 +14,21 @@ All notable changes to this project are documented here. The format follows
   `FACE_API_DOCS_BASE_URL`; with the flag on, `GET /openapi.json` lists it in `servers`.
 - Responses keep a `Cache-Control` a route sets itself (only the docs do); everything else is still `no-store`.
 
+### Changed (labeler: anchored named-neighbour vote)
+- Only anchors vote: people named by a person, or by the labeler from a folder, portrait, roster or curated override.
+  A person named from the vote itself votes only within `vote_anchor_distance` (0.45, centroids) of an anchor with the
+  same name (0 = never). Stops vote chains, where one wrongly voted cluster passed a name on to its neighbours.
+- Review holds on high and medium votes: mixed cluster (`vote_max_spread` 0.40 / two date eras `vote_era_gap_years` 8,
+  needs the optional `asset."fileCreatedAt"` grant) and person-named folders that say somebody else
+  (`vote_folder_min_faces` 2). `run` stats: `vote_voters_*`, `vote_held_spread|eras|folder|cleared`, phase `vote_review`.
+- People whose labeler name was cleared with an audit note `cleared-for-review` are held in every proposal (report and
+  worklist) and never named again automatically.
+
+### Added (labeler: recheck-votes)
+- `recheck-votes`: read-only sweep over every person named from the vote: would the anchors alone vote the same name,
+  distance to the nearest anchor of the name, spread, photo years / two eras, folder evidence. Report (with faces of
+  the suspects) + CSV, stored like a run's report (`export --run <id>`).
+
 ### Changed (labeler: faster named-neighbour vote)
 - The vote finds each unnamed face's nearest named face in batched matrix products (4,096 faces x 16,384 named faces
   per product) instead of one small product per cluster, which read the whole named-face matrix once per cluster and

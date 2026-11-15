@@ -933,3 +933,168 @@ def test_same_person_name_is_stricter_than_compatible():
     assert same_person_name("Jonathan Smith", "Jonathon Smith") and same_person_name(
         "Catherine Brown", "Dr. Catherine Brown"
     )
+
+
+# --- anchored vote: no vote chains, review holds, cleared people, read-only re-check
+
+
+def _chain_world():
+    """Anchor NA = Jane Doe (person a). Hub H was vote-named Jane Doe but mixes a and b. U = unnamed, person b."""
+    a, b = person(), person()
+    hub = np.stack([face_of(a) for _ in range(5)] + [face_of(b) for _ in range(15)])
+    named = {"NA": np.stack([face_of(a) for _ in range(10)]), "H": hub}
+    names = {"NA": "Jane Doe", "H": "Jane Doe"}
+    u = np.stack([face_of(b) for _ in range(6)])
+    clusters = [
+        Cluster("NA", 10, normalise(named["NA"].mean(0)), "Jane Doe"),
+        Cluster("H", 20, normalise(hub.mean(0)), "Jane Doe"),
+        Cluster("U", 6, normalise(u.mean(0)), ""),
+    ]
+    return a, b, named, names, clusters, {"U": u}
+
+
+def test_vote_chain_through_a_vote_named_cluster_is_stopped():
+    from immich_face_api.labeler.match import anchored_voters, named_vote
+
+    _, _, named, names, clusters, unnamed = _chain_world()
+    # the old rule: every named person votes -> U gets the anchor's name through the hub
+    (v,) = named_vote(unnamed, named, names, {"U": 6}, T)
+    assert v.identity.name == "Jane Doe"
+    voters, c = anchored_voters({c.person_id: (c.name, c.centroid) for c in clusters if c.name}, {"H"}, T)
+    assert voters == {"NA"} and c == {"anchors": 1, "vote_named_near_anchor": 0, "vote_named_dropped": 1}
+    assert named_vote(unnamed, {p: named[p] for p in voters}, names, {"U": 6}, T) == []
+
+
+def test_vote_named_person_near_an_anchor_still_votes_unless_disabled():
+    from immich_face_api.labeler.match import anchored_voters
+
+    a = person()
+    cen = {k: normalise(np.stack([face_of(a) for _ in range(8)]).mean(0)) for k in ("NA", "V")}
+    named = {"NA": ("Jane Doe", cen["NA"]), "V": ("Jane Doe", cen["V"]), "W": ("John Roe", cen["V"])}
+    voters, _ = anchored_voters(named, {"V", "W"}, T)
+    assert voters == {"NA", "V"}  # W: vote-named, and no anchor has the name John Roe
+    assert anchored_voters(named, {"V", "W"}, Thresholds(vote_anchor_distance=0))[0] == {"NA"}
+
+
+def test_date_eras_and_folder_contradiction():
+    from immich_face_api.labeler.match import date_eras, folder_contradiction
+
+    assert date_eras([2001, 2002, 2003, 2019, 2020, 2020], 8, 0.2) == ("2001-2003", "2019-2020")
+    assert date_eras([2001, 2002, 2003, 2004, 2005, 2006], 8, 0.2) is None
+    assert date_eras([2001] + [2020] * 9, 8, 0.2) is None  # one stray old photo is not an era
+    assert date_eras([2001, 2020], 8, 0.2) is None  # too few photos
+    assert folder_contradiction("Jane Doe", {"John Roe": 3}, 2) == ("John Roe", 3)
+    assert folder_contradiction("Jane Doe", {"Jane Doe": 5, "John Roe": 3}, 2) is None
+    assert folder_contradiction("Jane Doe", {"Jane Doe": 1, "John Roe": 1}, 2) is None
+    assert folder_contradiction("Jane Doe", None, 2) is None
+
+
+def test_review_holds_for_a_mixed_cluster():
+    from immich_face_api.labeler.match import spread, vote_review_holds
+
+    a = person()
+    one = np.stack([face_of(a) for _ in range(20)])
+    mixed = np.stack([face_of(p) for p in (a, person(), person(), person()) for _ in range(5)])  # a hub of four
+    assert spread(one) < T.vote_max_spread <= spread(mixed)
+    assert vote_review_holds("Jane Doe", one, T) == []
+    (h,) = vote_review_holds("Jane Doe", mixed, T)
+    assert h.startswith("mixed cluster: its faces are spread")
+    hs = vote_review_holds("Jane Doe", one, T, [2001] * 6 + [2020] * 6, {"John Roe": 4})
+    assert [x.split(":")[0] for x in hs] == ["mixed cluster", "folder evidence"] and "2001-2001" in hs[0]
+    off = Thresholds(vote_max_spread=0, vote_era_gap_years=0, vote_folder_min_faces=0)
+    assert vote_review_holds("Jane Doe", mixed, off, [2001] * 6 + [2020] * 6, {"John Roe": 4}) == []
+
+
+def test_write_origins_tracks_vote_tidy_correction_and_clear():
+    from immich_face_api.labeler.store import write_origins
+
+    vote_ev = ["named-neighbour vote: 5 of 5 sampled faces"]
+    rows = [
+        ("P1", "Hon Jane Doe", vote_ev, None, "r1"),
+        ("P1", "Jane Doe", [], "tidy-names", "r2"),  # title removed: still from the vote
+        ("P2", "Jane Doe", vote_ev, None, "r1"),
+        ("P2", "John Roe", [], "owner-approved correction", "r3"),  # corrected by the owner: an anchor now
+        ("P3", "Jane Doe", vote_ev, None, "r1"),
+        ("P3", "", [], "cleared-for-review: wrong name", "r4"),
+        ("P4", "Jane Doe", ["folder /people/Jane Doe/: 3 photo(s)"], None, "r1"),
+    ]
+    w = write_origins(rows)
+    assert (w["P1"]["vote"], w["P1"]["name"]) == (True, "Jane Doe")
+    assert (w["P2"]["vote"], w["P2"]["cleared"]) == (False, False)
+    assert (w["P3"]["vote"], w["P3"]["cleared"], w["P3"]["name"]) == (False, True, "")
+    assert not w["P4"]["vote"]
+
+
+class _VoteDB:
+    def __init__(self, samples, years=None):
+        self.s, self.y = samples, years or {}
+
+    def samples(self, owner, ids, k):
+        return {i: self.s[i] for i in ids if i in self.s}
+
+    def face_years(self, owner, ids, k):
+        return {i: self.y[i] for i in ids if i in self.y}
+
+
+class _VoteStore:
+    def __init__(self, writes):
+        self.w = writes
+
+    def latest_owner_writes(self):
+        return self.w
+
+
+def test_add_named_votes_anchored_and_cleared():
+    _, b, named, _, clusters, unnamed = _chain_world()
+    c_faces = np.stack([face_of(b) for _ in range(6)])
+    clusters.append(Cluster("C", 6, normalise(c_faces.mean(0)), ""))
+    writes = {
+        "H": {"vote": True, "cleared": False, "name": "Jane Doe", "run_id": "r1"},
+        "C": {"vote": False, "cleared": True, "name": "", "run_id": "r2"},
+    }
+    ctx = SimpleNamespace(store=_VoteStore(writes), db=_VoteDB({**named, **unnamed, "C": c_faces}))
+    props, st = cli.add_named_votes(ctx, "owner", clusters, [], T, None)
+    assert props == [] and st["vote_voters_vote_named_dropped"] == 1 and st["votes"] == 0
+    # with the hub as an anchor (say a person named it), U and C are voted; C is held as cleared for review
+    ctx.store = _VoteStore({"C": writes["C"]})
+    props, st = cli.add_named_votes(ctx, "owner", clusters, [], T, None)
+    by = {p.person_id: p for p in props}
+    assert set(by) == {"U", "C"} and st["vote_held_cleared"] == 1
+    assert any("cleared for curator review" in h for h in by["C"].hold)
+    assert not any("cleared" in h for h in by["U"].hold)
+
+
+def test_add_named_votes_holds_on_folder_evidence_and_eras():
+    a = person()
+    named = {"NA": np.stack([face_of(a) for _ in range(10)])}
+    u = np.stack([face_of(a) for _ in range(12)])
+    clusters = [
+        Cluster("NA", 10, normalise(named["NA"].mean(0)), "Jane Doe"),
+        Cluster("U", 12, normalise(u.mean(0)), ""),
+    ]
+    ctx = SimpleNamespace(store=_VoteStore({}), db=_VoteDB({**named, "U": u}, {"U": [1999] * 6 + [2015] * 6}))
+    props, st = cli.add_named_votes(ctx, "owner", clusters, [], T, None, folder_names={"U": {"John Roe": 5}})
+    (p,) = props
+    assert p.identity.name == "Jane Doe" and st["vote_held_folder"] == 1 and st["vote_held_eras"] == 1
+    assert any(h.startswith("folder evidence") for h in p.hold) and any("two eras" in h for h in p.hold)
+
+
+def test_recheck_flags_a_vote_named_cluster_the_anchors_do_not_support():
+    from immich_face_api.labeler.report import recheck_csv, recheck_html
+
+    _, _, named, _, clusters, _ = _chain_world()
+    a2 = person()
+    good = np.stack([face_of(a2) for _ in range(8)])
+    anchor2 = np.stack([face_of(a2) for _ in range(10)])
+    clusters += [
+        Cluster("NB", 10, normalise(anchor2.mean(0)), "John Roe"),
+        Cluster("G", 8, normalise(good.mean(0)), "John Roe"),  # vote-named and right
+    ]
+    usamp = {"H": named["H"], "G": good}
+    nsamp = {"NA": named["NA"], "NB": anchor2}
+    rows = cli.recheck(clusters, {"H", "G"}, usamp, nsamp, T, {"H": [2003] * 5 + [2021] * 15})
+    by = {r["person_id"]: r for r in rows}
+    assert by["H"]["suspect"] and not by["G"]["suspect"] and rows[0]["person_id"] == "H"
+    assert by["H"]["eras"] == "2003-2003 / 2021-2021" and by["G"]["anchor_distance"] < T.vote_anchor_distance
+    assert "Jane Doe" in recheck_html("r", {"suspects": 1}, rows[:1], {}, "")
+    assert recheck_csv(rows, "").count("\n") == 3

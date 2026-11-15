@@ -83,6 +83,19 @@ SELECT g, emb FROM (
 """
 
 
+# optional (date-era review hold on vote proposals): SELECT ("fileCreatedAt") ON asset; without it the check is skipped
+DATE_COLUMN = ("asset", "fileCreatedAt")
+
+_FACE_YEARS_SQL = f"""
+SELECT g, y FROM (
+  SELECT af."personGroupId"::text AS g, extract(year FROM a."fileCreatedAt")::int AS y,
+         row_number() OVER (PARTITION BY af."personGroupId" ORDER BY md5(af.id::text)) AS rn
+  FROM asset_face af JOIN asset a ON a.id = af."assetId"
+  WHERE af."ownerId" = %(owner)s AND af."personGroupId" = ANY(%(ids)s::uuid[]) AND {_FACE_FILTER}
+) x WHERE rn <= %(k)s
+"""
+
+
 class ImmichError(RuntimeError):
     pass
 
@@ -114,6 +127,7 @@ def _conninfo(s: LabelerSettings, dbname: str, host: str, user: str, password: s
 class ImmichDB:
     def __init__(self, s: LabelerSettings):
         self.s = s
+        self.has_dates = False  # set by check(): SELECT on the asset date column (optional)
         self.conn = psycopg.connect(
             _conninfo(s, s.db_name, s.db_host, s.db_user, s.db_password, "immich-people-labeler"),
             autocommit=True,
@@ -133,6 +147,7 @@ class ImmichDB:
                 (tables,),
             )
             have = set(cur.fetchall())
+            self.has_dates = DATE_COLUMN in have and ("asset", "id") in have
             want = {(t, c) for t, c in EXPECTED_COLUMNS if need_paths or t != "asset"}
             missing = sorted(f"{t}.{c}" for t, c in want - have)
             if missing:
@@ -170,6 +185,20 @@ class ImmichDB:
                 for g, emb in cur:
                     rows.setdefault(g, []).append(parse_vector(emb))
         return {g: normalise(np.stack(v)) for g, v in rows.items()}
+
+    def face_years(self, owner: str, person_ids: list[str], k: int) -> dict[str, list[int]]:
+        """Photo years of up to ``k`` faces per person (the same faces ``samples`` picks); {} without the date
+        column grant (see DATE_COLUMN) or before ``check``."""
+        if not getattr(self, "has_dates", False):
+            return {}
+        out: dict[str, list[int]] = {}
+        for i in range(0, len(person_ids), 500):
+            with self.conn.cursor() as cur:
+                cur.execute(_FACE_YEARS_SQL, {"owner": owner, "ids": person_ids[i : i + 500], "k": k})
+                for g, y in cur:
+                    if y:
+                        out.setdefault(g, []).append(int(y))
+        return out
 
     def named_people(self, owner: str) -> list[tuple[str, str]]:
         """(person id, name) of every named person of the owner (tidy-names)."""

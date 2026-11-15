@@ -193,3 +193,79 @@ organisation.</p>
 <table class="stats">{stat_rows}</table>
 <table><tr><th>#</th><th>Face</th><th>Faces</th><th>Suggestion (not applied)</th><th>Person</th></tr>{"".join(trs)}</table>
 </body></html>"""
+
+
+RECHECK_COLUMNS = [
+    "person_id",
+    "name",
+    "faces",
+    "suspect",
+    "reasons",
+    "anchor_distance",
+    "anchored_vote",
+    "spread",
+    "years",
+    "eras",
+    "folder_says",
+    "immich_url",
+    "decision",
+    "corrected_name",
+]
+
+
+def recheck_csv(rows: list[dict], web_base: str) -> str:
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(RECHECK_COLUMNS)
+    for r in rows:
+        w.writerow(
+            [
+                r["person_id"],
+                r["name"],
+                r["faces"],
+                "yes" if r["suspect"] else "",
+                "; ".join(r["suspect"]),
+                "" if r["anchor_distance"] is None else r["anchor_distance"],
+                r["anchored_vote"],
+                r["spread"],
+                r["years"],
+                r["eras"],
+                r["folder"],
+                person_url(web_base, r["person_id"]),
+                "",
+                "",
+            ]
+        )
+    return out.getvalue()
+
+
+def recheck_html(run_id: str, stats: dict, rows: list[dict], thumbs: dict, web_base: str) -> str:
+    e = html.escape
+    trs = []
+    for r in rows:
+        t = small_image(thumbs.get(r["person_id"]), 112)
+        url = person_url(web_base, r["person_id"])
+        ad = "-" if r["anchor_distance"] is None else f"{r['anchor_distance']:.3f}"
+        trs.append(
+            f"<tr><td>{f'<img src={t!r} width=96>' if t else '-'}</td><td><b>{e(r['name'])}</b><br>{r['faces']} faces</td>"
+            f"<td class='ev'>{'<br>'.join(e(x) for x in r['suspect'])}</td>"
+            f"<td>{ad}</td><td>{e(r['anchored_vote'])}</td><td>{r['spread']:.3f}</td>"
+            f"<td>{e(r['years'])}<br><b>{e(r['eras'])}</b></td><td>{e(r['folder'])}</td>"
+            f"<td class='ev'>{f'<a href={url!r}>open in Immich</a><br>' if url else ''}{e(r['person_id'])}</td></tr>"
+        )
+    stat_rows = "".join(
+        f"<tr><td>{e(str(k))}</td><td><b>{e(json.dumps(v, ensure_ascii=False) if isinstance(v, dict) else str(v))}</b></td></tr>"
+        for k, v in stats.items()
+    )
+    return f"""<!doctype html><html><head><meta charset="utf-8"><title>Vote re-check {e(run_id)}</title>
+<meta name="robots" content="noindex"><style>{_CSS}</style></head><body>
+<h1>People named by the named-neighbour vote: re-check ({e(run_id)})</h1>
+<p>Read-only. Each person below got its name from the vote (another named person's faces were the nearest), and
+fails the anchored rule: only people named by a person or from a folder, portrait or roster may vote. Anchor distance =
+centroid distance to the nearest anchor with the same name (same person usually well under 0.45). Nothing was changed;
+open each one in Immich and keep, rename or clear the name. Internal: contains photos of people; do not forward
+outside the organisation.</p>
+<table class="stats">{stat_rows}</table>
+<table><tr><th>Face</th><th>Name now</th><th>Why suspect</th><th>Anchor distance</th><th>Anchors vote</th>
+<th>Spread</th><th>Years</th><th>Folder says</th><th>Person</th></tr>{"".join(trs)}</table>
+</body></html>"""
