@@ -898,6 +898,7 @@ same identity. Listed in the report only; the labeler never merges.
 | `LABELER_CONFIG_FILE` | - | sources and thresholds (JSON) |
 | `LABELER_OUTPUT_DIR` | - | also write `report.html` + `proposals.csv` here |
 | `LABELER_MAX_APPLY` | 500 | names written per command at most |
+| `LABELER_DB_STATEMENT_TIMEOUT` | 1800 | seconds a single read query may take (the per-cluster centroid query grows with the library; was fixed at 600) |
 | `LABELER_KEEP_REPORTS` | 30 | report blobs kept (proposals and audit are kept) |
 
 ### Commands
