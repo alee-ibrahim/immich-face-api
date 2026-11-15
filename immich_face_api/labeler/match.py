@@ -726,3 +726,21 @@ def vote_review_holds(
     if fc:
         out.append(f"folder evidence: {fc[1]} of its faces are the person of the folder(s) named {fc[0]!r}")
     return out
+
+
+def main_faces(emb: np.ndarray, max_distance: float) -> np.ndarray:
+    """The faces of a named cluster that may vote: those of its MAIN sub-identity. Clusters are often mixed (a named
+    cluster can hold a share of other people's faces); a foreign face must not pass the cluster's name on. Seed = the
+    face with the most faces within ``max_distance``; centroid = mean of those; keep the faces within ``max_distance``
+    of it (computed twice). 0 = keep all faces."""
+    if max_distance <= 0 or len(emb) < 3:
+        return emb
+    sim = emb @ emb.T
+    seed = int((sim >= 1.0 - max_distance).sum(1).argmax())
+    keep = sim[seed] >= 1.0 - max_distance
+    for _ in range(2):
+        c = normalise(emb[keep].mean(0))
+        keep = emb @ c >= 1.0 - max_distance
+        if not keep.any():
+            return emb[:0]
+    return emb[keep]

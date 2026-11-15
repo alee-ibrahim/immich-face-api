@@ -34,6 +34,7 @@ from .match import (
     date_eras,
     folder_contradiction,
     held,
+    main_faces,
     merge_candidates,
     named_vote,
     propose,
@@ -148,6 +149,17 @@ def folder_names_by_person(refs, ov: dict[tuple[str, str], int]) -> dict[str, di
     return out
 
 
+def voter_faces(nsamp: dict, t) -> tuple[dict, int]:
+    """Only the faces of each voter's main sub-identity vote (``main_faces``). Returns (samples, faces dropped)."""
+    out, dropped = {}, 0
+    for p, e in nsamp.items():
+        m = main_faces(e, t.vote_voter_max_distance)
+        dropped += len(e) - len(m)
+        if len(m):
+            out[p] = m
+    return out, dropped
+
+
 def vote_origins(ctx, clusters) -> tuple[set[str], set[str]]:
     """(vote-named people, people cleared for review), from the audit: a person counts as vote-named while its
     current name is still the one the labeler wrote from the vote (a person who renamed it made it an anchor)."""
@@ -175,6 +187,7 @@ def add_named_votes(ctx, owner, clusters, props, t, write_sources, timings=None,
     with phase(timings, "vote_samples"):
         nsamp = ctx.db.samples(owner, [c.person_id for c in named], t.vote_named_sample) if named else {}
         usamp = ctx.db.samples(owner, [c.person_id for c in unnamed], t.vote_unnamed_sample) if unnamed else {}
+    nsamp, dropped = voter_faces(nsamp, t)
     with phase(timings, "vote"):
         votes = named_vote(usamp, nsamp, names, {c.person_id: c.faces for c in clusters}, t)
     with phase(timings, "vote_review"):
@@ -185,6 +198,7 @@ def add_named_votes(ctx, owner, clusters, props, t, write_sources, timings=None,
             else {}
         )
         st = Counter(votes=len(votes), **{f"vote_voters_{k}": n for k, n in vst.items()})
+        st["vote_voter_faces_foreign_dropped"] = dropped
         for v in votes:
             if v.person_id in cleared:
                 v.hold.append("cleared for curator review: the labeler does not name this person again")
@@ -906,6 +920,7 @@ def cmd_recheck_votes(s: LabelerSettings, args) -> int:
         targets = [c.person_id for c in named_all if c.person_id in vote_named]
         with phase(timings, "samples"):
             nsamp = ctx.db.samples(owner, sorted(p for p in voters if p not in vote_named), t.vote_named_sample)
+            nsamp, foreign = voter_faces(nsamp, t)
             usamp = ctx.db.samples(owner, targets, t.vote_unnamed_sample)
             years = ctx.db.face_years(owner, targets, t.vote_unnamed_sample)
         with phase(timings, "recheck"):
@@ -924,6 +939,7 @@ def cmd_recheck_votes(s: LabelerSettings, args) -> int:
             "suspect_faces": sum(r["faces"] for r in sus),
             "suspect_reasons": dict(reasons.most_common()),
             "dates_available": bool(years),
+            "voter_faces_foreign_dropped": foreign,
             **{f"voters_{k}": n for k, n in vst.items()},
             "phase_seconds": timings,
         }

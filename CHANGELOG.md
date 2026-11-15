@@ -10,6 +10,12 @@ All notable changes to this project are documented here. The format follows
   or a new person; HTML contact sheet + review CSV, named clusters first), `purity-apply --review <csv>` (moves only
   approved sub-identities' faces through the Immich API, audited in `labeler_face_move`) and `purity-undo --run`.
 
+### Changed (labeler: only a voter's main faces vote)
+- In the named-neighbour vote (and `recheck-votes`), only the sampled faces of a named person's main sub-identity vote:
+  seed = the face with most neighbours within `vote_voter_max_distance` (0.40), then the faces within that distance of
+  their centroid. Foreign faces inside a correctly named, partly mixed cluster no longer pass its name on. Stats
+  `vote_voter_faces_foreign_dropped` / `voter_faces_foreign_dropped`; 0 = old behaviour.
+
 ### Added (open developer docs)
 - `FACE_API_OPEN_DOCS=true` (default off): the API serves login-free, read-only docs for app developers:
   `GET /docs` (API reference with curl/PHP/Python/Node examples, main-subject fields, verify's `subject` option,
