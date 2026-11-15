@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Label subjects{% endblock %}
+{% block body %}
+<h1>Label subjects</h1>
+{% set notes = {
+  "saved": ("", "Saved. Thank you."),
+  "no-immich": ("error", "Sampling from Immich is not set up (FACE_API_IMMICH_API_URL and FACE_API_IMMICH_API_KEY). Upload a photo instead."),
+  "not-ready": ("error", "The service is not ready right now; try again in a minute."),
+  "immich-error": ("error", "Immich could not be reached; try again in a minute."),
+  "no-sample": ("error", "No unlabelled photo with faces was found this time; try again."),
+  "expired": ("error", "The form expired; the labels were not saved."),
+  "missing": ("error", "That photo is no longer available."),
+} %}
+{% if msg in notes %}<div class="notice {{ notes[msg][0] }}">{{ notes[msg][1] }}</div>{% endif %}
+
+<div class="panel">
+  <p>Help the face API tell who a photo is <b>about</b>. For every face in a photo choose:</p>
+  <ul>
+    <li><span class="key-main">Main</span>: the photo is about this person (portrait, the speaker at the podium, the person receiving an award). At most one per photo.</li>
+    <li><span class="key-co">Co-subject</span>: one of two or a few people the photo is about (a handshake, two people talking, a small group posing).</li>
+    <li><span class="key-bg">Background</span>: everyone else (the audience, people behind, small or blurred faces, one of many in a chamber or crowd shot). This is the default.</li>
+  </ul>
+  <p class="muted">Click a box to cycle its role, or use the buttons under the photo. If a photo is unclear, choose "Not sure".
+  Only the face boxes, the measured signals and your labels are kept, never the photo.</p>
+  <div class="row">
+    {% if immich %}
+    <a class="btn" href="/subjects/next">Label a random photo</a>
+    <a class="btn ghost-btn" href="/subjects/next?named=1">… with a named person</a>
+    {% endif %}
+  </div>
+  <form id="subject-upload" class="row" data-csrf="{{ csrf }}">
+    <label class="grow">{% if immich %}Or upload a photo{% else %}Upload a photo{% endif %} (JPEG, PNG, WebP or HEIC, up to {{ max_mb }} MB)
+      <input type="file" name="image" required accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif"></label>
+    <button>Detect faces</button>
+  </form>
+</div>
+<div id="message" class="notice hidden"></div>
+<div id="upload-area"></div>
+
+<h2>Progress</h2>
+<div class="grid">
+  <div class="panel stat"><div class="n">{{ "{:,}".format(stats.photos) }}</div><div class="l">photos labelled</div></div>
+  <div class="panel stat"><div class="n">{{ "{:,}".format(stats.faces.main) }}</div><div class="l">main faces</div></div>
+  <div class="panel stat"><div class="n">{{ "{:,}".format(stats.faces.co_subject) }}</div><div class="l">co-subject faces</div></div>
+  <div class="panel stat"><div class="n">{{ "{:,}".format(stats.faces.background) }}</div><div class="l">background faces</div></div>
+  <div class="panel stat"><div class="n">{{ "{:,}".format(stats.skipped) }}</div><div class="l">not sure</div></div>
+  {% if admin %}<div class="panel stat"><div class="n">{{ "{:.0%}".format(stats.agreement) if stats.agreement is not none else "—" }}</div><div class="l">model agrees with labels</div></div>{% endif %}
+</div>
+
+{% if admin %}
+<div class="panel">
+  <h2>Model</h2>
+  <p>Subject model <code>{{ model.version }}</code>{% if model.description %} ({{ model.description }}){% endif %}; scoring <code>{{ model.scoring }}</code>;
+  head pose from landmarks: {{ "on" if model.landmarks else "off" }}.</p>
+  <p class="muted">To recalibrate from these labels (aim for 300+ photos with a mix of portraits, groups and crowds), run
+  <code>python -m immich_face_api calibrate --out subject-model.json</code> with the store settings, check the precision and
+  recall it prints, then set <code>FACE_API_SUBJECT_MODEL_FILE</code> to the new file on the API and this admin.</p>
+  {% if stats.people %}
+  <table class="cards"><thead><tr><th>Curator</th><th>Photos</th><th>Last</th></tr></thead><tbody>
+  {% for p in stats.people %}<tr><td data-label="Curator">{{ p.who }}</td><td data-label="Photos">{{ p.photos }}</td><td data-label="Last">{{ p.last | ago }}</td></tr>{% endfor %}
+  </tbody></table>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if recent %}
+<h2>{{ "Recently labelled" if admin else "Your recent labels" }}</h2>
+<div class="scroll"><table class="cards">
+  <thead><tr><th>Photo</th><th>When</th>{% if admin %}<th>By</th>{% endif %}<th>Faces</th><th>Main</th><th>Type</th></tr></thead>
+  <tbody>{% for r in recent %}<tr>
+    <td data-label="Photo"><a href="/subjects/{{ r.id }}">#{{ r.id }}</a> {{ "(upload)" if r.source == "upload" }}</td>
+    <td data-label="When">{{ r.labeled_at | ago }}</td>
+    {% if admin %}<td data-label="By">{{ r.labeled_by }}</td>{% endif %}
+    <td data-label="Faces">{{ r.faces }}</td>
+    <td data-label="Main">{{ "not sure" if r.skipped else r.mains }}</td>
+    <td data-label="Type">{{ r.photo_type | replace("_", " ") }}</td>
+  </tr>{% endfor %}</tbody>
+</table></div>
+{% endif %}
+
+<template id="label-form-template">
+  <form method="post" class="label-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="stage labeling"><img alt="The uploaded photo with the detected faces outlined"></div>
+    <div class="face-roles"></div>
+    <div class="row"><button name="action" value="save">Save</button>
+      <button class="ghost" name="action" value="skip">Not sure</button></div>
+  </form>
+</template>
+<script src="/static/subjects.js"></script>
+{% endblock %}

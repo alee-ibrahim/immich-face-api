@@ -5,6 +5,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added (main subject)
+- **Main-subject scoring** in `POST /v1/identify`: per face `prominence` (0–1), `role` (`main`, `co_subject`,
+  `background`) and the raw `subject_signals` (size, dominance, lead, sharpness and sharpness relative to the other faces
+  and to the background, centrality, rule of thirds, edge cut, exposure, detection score, and head pose from landmarks);
+  per photo `photo_type` (`portrait`, `small_group`, `crowd`), `main_face_index` and `subject_model_version`. Computed
+  in-process from the decoded image (~15–30 ms per photo). `FACE_API_SUBJECT_SCORING` (`always`, `request`, `off`) and
+  `?subject=0|1`.
+- `POST /v1/verify` (and batch items) with `subject=1`: `is_main_subject`, `role` and `prominence` per claim.
+- `FACE_API_SUBJECT_LANDMARKS`: head pose from the detector's 5 landmarks (one more, detection-only ML call per image).
+- Versioned subject model (weights + thresholds) as JSON: `FACE_API_SUBJECT_MODEL_FILE` / `FACE_API_SUBJECT_MODEL`.
+- Admin **Label subjects**: curators mark main / co-subject / background on random Immich photos with faces (previews
+  fetched through Immich's API with a view-only key, never stored) or uploads; only boxes, signals and labels are kept
+  (store migration `004_subject_labels.sql`).
+- `python -m immich_face_api calibrate`: logistic regression + threshold search on the labels, cross-validated
+  precision/recall for "main" and "subject", writes a new versioned model; `--export` / `--labels` JSONL.
+- Admin **curator** role: `FACE_API_OIDC_CURATOR_VALUES` (values of `FACE_API_OIDC_ADMIN_CLAIM`); curators only see
+  *Label subjects*. `FACE_API_IMMICH_API_URL`, `FACE_API_IMMICH_API_KEY[_FILE]`.
+- Readiness checks `asset_face."assetId"` (photo sampling for labelling; no new grant).
+
 ### Fixed (face cache memory)
 - The face cache rebuild no longer holds every fetched row plus float32 copies (~8 KiB per cached face, OOM kills at
   ~110k cached faces in 1 GiB). Faces are counted per person first, the float16 matrix is allocated once, and

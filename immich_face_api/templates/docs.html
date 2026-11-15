@@ -21,6 +21,7 @@
   <a href="#authentication">Authentication</a>
   <a href="#identify">POST /v1/identify</a>
   <a href="#response">Response fields</a>
+  {% if lim.subject != "off" %}<a href="#subject">Main subject</a>{% endif %}
   <a href="#verify">POST /v1/verify</a>
   <a href="#people">GET /v1/people</a>
   {% if lim.changes %}<a href="#changes">GET /v1/people/changes</a>{% endif %}
@@ -159,7 +160,35 @@ const { faces } = await res.json();'),
   <tr><td><code>ambiguous</code></td><td><code>true</code> = another person is almost as close: show the candidates and pre-select nobody</td></tr>
   <tr><td><code>candidates</code></td><td>only with <code>?candidates=N</code>: ranked alternatives; <code>votes</code> = how many of the 20 nearest faces are that person's</td></tr>
   <tr><td><code>image</code></td><td>width and height of the upright photo</td></tr>
+  {% if lim.subject != "off" %}
+  <tr><td><code>role</code>, <code>prominence</code></td><td>is the photo <b>about</b> this face? <code>main</code>,
+    <code>co_subject</code> or <code>background</code>, with a 0–1 score; see <a href="#subject">Main subject</a></td></tr>
+  <tr><td><code>photo_type</code>, <code>main_face_index</code></td><td><code>portrait</code>, <code>small_group</code>,
+    <code>crowd</code> (or <code>none</code>); the index in <code>faces</code> of the main face, or <code>null</code></td></tr>
+  {% endif %}
 </table>
+
+{% if lim.subject != "off" %}
+<h2 id="subject">Main subject: who the photo is about</h2>
+<p>Recognising someone is not the same as the photo being <b>about</b> them. Each face also gets a
+<code>role</code>: <code>main</code> (the portrait, the speaker at the podium), <code>co_subject</code> (one of two or a
+few people the photo is about: a handshake, a small group posing) or <code>background</code> (the audience, people behind,
+small or blurred faces, one of many in a chamber shot), and a <code>prominence</code> from 0 to 1. It is measured from the
+photo itself: face size and how much it stands out from the other faces, sharpness (also compared with the other faces
+and the background), position in the frame, faces cut by the edge, exposure{% if lim.landmarks %}, head pose{% endif %}
+and the number of faces. The raw measurements are in <code>subject_signals</code>.
+{% if lim.subject == "always" %}It is on by default; <code>?subject=0</code> skips it.{% else %}Add <code>?subject=1</code> to get it.{% endif %}
+Scored by model <code>{{ lim.subject_version }}</code>.</p>
+<ul>
+  <li><b>Profile pages:</b> to show a person's photos, use the photos where that person's <code>person_id</code> has
+    <code>role</code> <code>main</code> or <code>co_subject</code>; <code>main</code> only for photos about that person alone.</li>
+  <li><b>Verify:</b> add <code>subject=1</code> to <code>POST /v1/verify</code>; each claim then says
+    <code>is_main_subject</code> (a match on the photo's main face), with the face's <code>role</code> and
+    <code>prominence</code>.</li>
+  <li>Store the role with the confirmed tag, and the <code>subject_model_version</code>: when the model is recalibrated
+    you can re-check old photos with verify.</li>
+</ul>
+{% endif %}
 
 {% if lim.people %}
 <h2 id="people"><span class="method get">GET</span> /v1/people</h2>
@@ -200,8 +229,10 @@ $claim = $r[\'claims\'][0];   // verdict: match | match_not_best | no_match | no
   <tr><td><code>person_gone</code></td><td>the person was deleted, hidden or un-named (<code>status</code>)</td><td>see <a href="#changes">changes</a></td></tr>
   <tr><td><code>no_reference</code></td><td>the person has no faces left to compare with</td><td>ask staff</td></tr>
 </table>
+{% if lim.subject != "off" %}<p>Add <code>-F subject=1</code> to also get <code>is_main_subject</code>, <code>role</code> and
+<code>prominence</code> per claim (see <a href="#subject">Main subject</a>).</p>{% endif %}
 <p><b>Batch:</b> <code>POST /v1/verify/batch</code> with JSON <code>{"items": [{"ref": "photo-1", "image": "&lt;base64&gt;",
-"person_ids": ["..."], "box": {...}}]}</code>, at most {{ lim.verify_batch }} photos and {{ lim.max_mb }} MiB per call; one
+"person_ids": ["..."], "box": {...}{% if lim.subject != "off" %}, "subject": true{% endif %}}]}</code>, at most {{ lim.verify_batch }} photos and {{ lim.max_mb }} MiB per call; one
 rate-limit token per photo. Each item comes back with its <code>ref</code>, or with an <code>error</code> of its own.</p>
 
 {% if lim.changes %}
@@ -376,6 +407,9 @@ this deployment keeps:</p>
   <tr><td>Hourly counts</td><td>requests, faces, matches, errors and latency per app and hour. No names. Kept for the usage retention (default 400 days)</td></tr>
   <tr><td>Request log</td><td><b>{{ "on" if p.request_log else "off" }}</b>{% if p.request_log %}, kept <b>{{ p.request_days }} days</b>{% endif %}: per verify call the time, app, status, latency, image size and counts only; per identify call the time, app, status or error code, latency, image size in bytes and pixels, the number of faces matched, unknown, ambiguous and near the threshold, and per face (at most {{ p.max_faces }}) its box, the matched <b>name, person id and distance</b> and the nearest named people with their distances</td></tr>
   {% if lim.changes %}<tr><td>People change log</td><td>ids and names of the archive's named people, which named person each face belongs to (ids only), and the change events, kept <b>{{ lim.changes_days }} days</b>. No images, no embeddings</td></tr>{% endif %}
+  <tr><td>Subject labels</td><td>what curators marked on <a href="/subjects">Label subjects</a>: per photo the archive asset id
+    (none for uploads), the face boxes, the measured signals, the model's prediction and the labels, who and when. No images,
+    no embeddings; archive previews are fetched from the archive only while a curator labels them</td></tr>
   <tr><td>Face crops</td><td><b>{{ p.crops }}</b>{% if p.crops != "none" %}, kept <b>{{ p.crop_days }} days</b>: a {{ p.crop_size }} px JPEG of {{ "every detected face" if p.crops == "all" else "each unknown, ambiguous or near-threshold face" }} (a new image, no metadata) and its face embedding, so curators can name missed people. Crops and embeddings are <b>biometric data</b>{% endif %}</td></tr>
 </table>
 <ul>

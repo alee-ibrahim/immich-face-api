@@ -192,6 +192,19 @@ class Settings:
     immich_url: str = ""  # Immich web URL for person links in the admin UI, e.g. https://photos.example.org
     similar_probes: int = 32  # vchordrq.probes for "find similar in Immich" (0: the database default)
 
+    # main-subject scoring (see README "Main subject"): "always", "request" (only with ?subject=1) or "off"
+    subject_scoring: str = "always"
+    # head pose from the detector's landmarks: one more detection-only ML call per image (in parallel)
+    subject_landmarks: bool = False
+    subject_model_file: str | None = None  # versioned weights JSON (python -m immich_face_api calibrate)
+    subject_model_json: str | None = field(default=None, repr=False)  # the same as inline JSON
+
+    # admin "Label subjects": curators may use only that page (role values of FACE_API_OIDC_ADMIN_CLAIM)
+    oidc_curator_values: tuple[str, ...] = ()
+    # sample photos for labelling from Immich: its API (in-cluster URL) and a key with the asset.view permission only
+    immich_api_url: str = ""
+    immich_api_key: str = field(default="", repr=False)
+
     @property
     def oidc_enabled(self) -> bool:
         return bool(self.oidc_issuer and self.oidc_client_id and self.oidc_client_secret)
@@ -295,4 +308,13 @@ class Settings:
             verify_batch_max=_int("VERIFY_BATCH_MAX", 10, 1, 100),
             immich_url=(_env("IMMICH_URL", "") or "").rstrip("/"),
             similar_probes=_int("SIMILAR_PROBES", 32, 0, 100_000),
+            subject_scoring=_choice("SUBJECT_SCORING", "always", ("always", "request", "off")),
+            subject_landmarks=_bool("SUBJECT_LANDMARKS", False),
+            subject_model_file=_env("SUBJECT_MODEL_FILE"),
+            subject_model_json=_env("SUBJECT_MODEL"),
+            oidc_curator_values=tuple(
+                v.strip() for v in (_env("OIDC_CURATOR_VALUES", "") or "").split(",") if v.strip()
+            ),
+            immich_api_url=(_env("IMMICH_API_URL", "") or _env("IMMICH_URL", "") or "").rstrip("/"),
+            immich_api_key=_secret("IMMICH_API_KEY") or "",
         )
