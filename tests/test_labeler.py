@@ -833,3 +833,38 @@ def test_roster_cards_from_url_and_validation():
     assert roster_cards(src, F(None)) == []
     with pytest.raises(ConfigError):
         WebSource(key="r", label="R", kind="roster")
+
+
+def test_named_vote_holds_look_alikes():
+    from immich_face_api.labeler.match import lookalike_names, named_vote
+
+    a = person()
+    twin = normalise(a + RNG.normal(scale=0.02, size=DIM))  # a different person who looks almost the same
+    named = {"NA": np.stack([face_of(a) for _ in range(10)]), "NT": np.stack([face_of(twin) for _ in range(10)])}
+    names = {"NA": "Ahmed Didi", "NT": "Ahmed Hisham Wajeeh"}
+    assert set(lookalike_names(named, names, T.vote_lookalike_distance)) == {"Ahmed Didi", "Ahmed Hisham Wajeeh"}
+    unnamed = {"U1": np.stack([face_of(a) for _ in range(6)])}
+    (v,) = named_vote(unnamed, named, names, {"U1": 6}, T)
+    assert v.hold and "look-alike" in v.hold[0] and any(e.startswith("HOLD: look-alike") for e in v.evidence())
+    off = Thresholds(vote_min_name_gap=0, vote_lookalike_distance=0)
+    (w,) = named_vote(unnamed, named, names, {"U1": 6}, off)
+    assert not w.hold
+
+
+def test_named_vote_no_hold_for_clearly_different_people():
+    from immich_face_api.labeler.match import named_vote
+
+    a, b = person(), person()
+    named = {"NA": np.stack([face_of(a) for _ in range(10)]), "NB": np.stack([face_of(b) for _ in range(10)])}
+    names = {"NA": "Ahmed Didi", "NB": "Ahmed Hisham Wajeeh"}
+    (v,) = named_vote({"U": np.stack([face_of(a) for _ in range(5)])}, named, names, {"U": 5}, T)
+    assert not v.hold and v.band == "high"
+
+
+def test_same_person_name_is_stricter_than_compatible():
+    from immich_face_api.labeler.match import same_person_name
+
+    assert compatible("Ahmed Didi", "Ahmed Hisham Wajeeh") and not same_person_name("Ahmed Didi", "Ahmed Hisham Wajeeh")
+    assert same_person_name("Zahiya Zareer", "Zaahiya Zareer") and same_person_name(
+        "Mustafa Lutfi", "Dr. Musthafa Luthfee"
+    )

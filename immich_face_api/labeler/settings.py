@@ -68,6 +68,12 @@ class Thresholds:
     vote_max_median: float = 0.4
     vote_unnamed_sample: int = 50  # faces per unnamed cluster
     vote_named_sample: int = 300  # faces per named person
+    # look-alike guard (hold, never write): the vote's faces must be clearly closer to the voted name than to any
+    # OTHER named person (median per-face gap), and more clearly so when the voted name has a known look-alike (another
+    # name whose faces' centroid is within vote_lookalike_distance). 0 disables a check.
+    vote_min_name_gap: float = 0.05
+    vote_lookalike_distance: float = 0.40
+    vote_lookalike_min_gap: float = 0.10
 
 
 @dataclass

@@ -454,6 +454,8 @@ def named_vote(
     npids = list(named)
     nmat = np.concatenate([named[p] for p in npids])
     owner_of = np.concatenate([np.full(len(named[p]), i) for i, p in enumerate(npids)])
+    lookalike = lookalike_names(named, names, t.vote_lookalike_distance) if t.vote_lookalike_distance > 0 else {}
+    other_cache: dict[str, np.ndarray] = {}
     idents: dict[str, Identity] = {}
     out = []
     for pid, emb in unnamed.items():
@@ -511,5 +513,65 @@ def named_vote(
             why_not_high=why,
         )
         prop.vote = (votes[top], len(emb), len(support))
+        if t.vote_min_name_gap > 0 or top in lookalike:
+            if top not in other_cache:
+                other_cache[top] = np.array([not same_person_name(names[p], top) for p in npids])[owner_of]
+            gap, runner = _name_gap(emb[sel], best_d[sel], nmat, owner_of, npids, names, other_cache[top])
+            need = t.vote_min_name_gap
+            if top in lookalike:
+                need = max(need, t.vote_lookalike_min_gap)
+            if runner is not None and gap < need:
+                la = f"; {top!r} has a known look-alike {lookalike[top][0]!r}" if top in lookalike else ""
+                prop.hold.append(
+                    f"look-alike: the voting faces are only {gap:.3f} closer to {top!r} than to {runner!r} "
+                    f"(needs {need:.2f}){la}"
+                )
         out.append(prop)
     return out
+
+
+def same_person_name(a: str, b: str) -> bool:
+    """Stricter than ``compatible`` for telling two NAMED people apart: the same key, or compatible spellings with at
+    least two name words on both sides ("Ahmed Didi" vs "Ahmed Hisham Wajeeh" are different people)."""
+    if name_key(a) == name_key(b):
+        return True
+    return compatible(a, b) and min(len(name_tokens(a)), len(name_tokens(b))) >= 2
+
+
+def lookalike_names(named: dict[str, np.ndarray], names: dict[str, str], max_distance: float) -> dict[str, tuple]:
+    """Names whose faces' centroid is within ``max_distance`` of the centroid of a different person's name:
+    name -> (closest other name, distance)."""
+    by: dict[str, list[np.ndarray]] = {}
+    for pid, emb in named.items():
+        by.setdefault(names[pid], []).append(emb)
+    keys = list(by)
+    if len(keys) < 2:
+        return {}
+    cent = np.stack([normalise(np.concatenate(by[k]).mean(0)) for k in keys])
+    d = 1.0 - cent @ cent.T
+    np.fill_diagonal(d, 9.0)
+    out: dict[str, tuple] = {}
+    for i, j in zip(*np.where(d <= max_distance), strict=True):
+        a, b = keys[int(i)], keys[int(j)]
+        if same_person_name(a, b):
+            continue
+        if a not in out or d[i, j] < out[a][1]:
+            out[a] = (b, round(float(d[i, j]), 3))
+    return out
+
+
+def _name_gap(emb, best_d, nmat, owner_of, npids, names, other) -> tuple[float, str | None]:
+    """Median over the voting faces of (distance to the nearest face of ANOTHER named person - distance to the
+    nearest face of the voted name), and that other person's most frequent name. ``other``: per named face, True
+    when it belongs to another person."""
+    if not other.any():
+        return 1.0, None
+    sim = emb @ nmat[other].T
+    k = sim.argmax(1)
+    d_other = 1.0 - sim[np.arange(len(k)), k]
+    oo = owner_of[other][k]
+    counts: dict[str, int] = {}
+    for o in oo:
+        counts[names[npids[o]]] = counts.get(names[npids[o]], 0) + 1
+    runner = max(counts, key=lambda n: (counts[n], n))
+    return float(np.median(d_other - best_d)), runner

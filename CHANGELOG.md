@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added (labeler: look-alike guard for the named-neighbour vote)
+- A vote is held when its faces are not clearly closer to the voted name than to another named person (median
+  per-face gap < `vote_min_name_gap`, default 0.05), or < `vote_lookalike_min_gap` (0.10) when the voted name has a
+  known look-alike (`vote_lookalike_distance`, 0.40, between name centroids). The hold names the runner-up. Found on
+  a real archive: a vote spread a member's name to a different person's clusters.
+
 ### Added (labeler: roster source)
 - Web source `"kind": "roster"`: people (name, portrait URL, other-language names, details such as position and
   organisation) from a JSON roster file, a local path or an http(s) URL, typically written by a separate scraper.
