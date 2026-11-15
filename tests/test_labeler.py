@@ -763,3 +763,73 @@ def test_tidy_names_parser():
     assert not a.apply and not a.copies
     a = p.parse_args(["tidy-names", "--copies", "--apply"])
     assert a.apply and a.copies
+
+
+def test_roster_cards_from_file(tmp_path):
+    import json as _json
+
+    from immich_face_api.labeler.web import roster_cards
+
+    roster = tmp_path / "roster.json"
+    roster.write_text(
+        _json.dumps(
+            {
+                "people": [
+                    {
+                        "id": "a1",
+                        "name": "  Jane   Doe ",
+                        "image_url": "https://example.org/p/jane.jpg",
+                        "alt_names": {"dv": "ޖޭން"},
+                        "details": {"position": "Minister of Things", "organisation": "Ministry", "page_url": "u"},
+                    },
+                    {"id": "a1", "name": "Repeated Id", "image_url": "https://example.org/p/x.jpg"},
+                    {"id": "b2", "name": "No Image"},
+                    {"id": "c3", "name": "Bad Scheme", "image_url": "file:///etc/passwd"},
+                    "not an object",
+                    {
+                        "id": "d4",
+                        "name": "John Roe",
+                        "image_url": "https://example.org/p/john.jpg",
+                        "details": {"label": "Judge, Court"},
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    src = WebSource(key="officials", label="Officials", kind="roster", roster=str(roster), licence="public pages")
+    a, d = roster_cards(src, fetcher=None)
+    assert (a.id, a.name, a.alt_names, a.image_url) == (
+        "a1",
+        "Jane Doe",
+        {"dv": "ޖޭން"},
+        "https://example.org/p/jane.jpg",
+    )
+    assert a.label == "Minister of Things, Ministry"
+    assert a.details["licence"] == "public pages" and a.details["page_url"] == "u"
+    assert (d.name, d.label) == ("John Roe", "Judge, Court")
+
+
+def test_roster_cards_from_url_and_validation():
+    import json as _json
+
+    from immich_face_api.labeler.web import roster_cards
+
+    class F:
+        def __init__(self, body):
+            self.body, self.urls = body, []
+
+        def get(self, url, immutable, limit):
+            self.urls.append(url)
+            return self.body
+
+    body = _json.dumps({"people": [{"id": 7, "name": "Jane Doe", "image_url": "http://x.org/j.png"}]}).encode()
+    f = F(body)
+    src = WebSource(key="r", label="R", kind="roster", roster="https://x.org/roster.json")
+    (c,) = roster_cards(src, f)
+    assert f.urls == ["https://x.org/roster.json"] and c.id == "7" and c.label == ""
+    with pytest.raises(ValueError):
+        roster_cards(src, F(b'[{"id": 1}]'))
+    assert roster_cards(src, F(None)) == []
+    with pytest.raises(ConfigError):
+        WebSource(key="r", label="R", kind="roster")

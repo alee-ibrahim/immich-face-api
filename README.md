@@ -810,6 +810,14 @@ More source kinds:
   names from the same card; `immutable: true` fetches a snapshot once.
 - **Wikidata** (`"kind": "wikidata"`): a SPARQL query returning `?item ?itemLabel ?image` (optional `?dvLabel` etc.);
   the Commons licence and author of every image are recorded with the reference.
+- **Roster** (`"kind": "roster"`, `"roster": "<path or https URL>"`): a JSON file with one entry per person
+  (`id`, `name`, `image_url`, optional `alt_names` and `details`), for sources that do not fit one listing regex, e.g.
+  the leadership pages of many organisations, each with its own layout. A separate scraper (your own, outside this
+  project) writes the file; the labeler fetches the portraits itself, politely and cached like listing portraits.
+  `details.position` and `details.organisation` (or `details.label`) appear in the evidence, so the report and the
+  audit log show where a name came from; they never go into the Immich name. Schema:
+  [`examples/labeler/roster.example.json`](examples/labeler/roster.example.json). Entries without an id, a name or an
+  http(s) `image_url` are skipped; a broken roster file is logged and skipped without affecting other sources.
 - **People already named in Immich** (`"named_people": true`): a face-level *named-neighbour vote* finds the other,
   unnamed clusters of a named person: each sampled face of an unnamed cluster votes for the person of its nearest named
   face (within `maxDistance`), as Immich itself assigns faces. Measured on one archive (leave one named cluster out):

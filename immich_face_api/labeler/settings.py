@@ -109,6 +109,12 @@ class WebSource:
     ``?<lang>Label`` for other languages, e.g. ``?dvLabel``, and ``?role``). The licence and author of every
     Wikimedia Commons image are looked up and kept with the reference.
 
+    ``kind: "roster"``: a JSON ``roster`` file (a local path, e.g. a mounted config file, or an http(s) URL) with one
+    entry per person, typically written by a separate scraper for sites whose pages do not fit one regex:
+    ``{"people": [{"id", "name", "image_url", "alt_names": {lang: name}, "details": {key: text}}]}``. ``details``
+    are kept with the reference; ``details.label`` (or ``position`` and ``organisation``) is shown in the evidence,
+    so curators see where a name came from. Portraits are fetched like listing portraits (delay, User-Agent, cache).
+
     ``licence``: what the source's images may be used for (recorded in the report and audit)."""
 
     key: str
@@ -123,6 +129,7 @@ class WebSource:
     alt_name_groups: dict = field(default_factory=dict)
     immutable: bool = False  # pages never change (archived snapshots): fetch once
     licence: str = ""
+    roster: str = ""  # kind "roster": path or http(s) URL of the roster JSON
     regex: re.Pattern | None = field(init=False, repr=False, default=None)
 
     def __post_init__(self):
@@ -132,8 +139,12 @@ class WebSource:
             if "?item" not in self.query or "?image" not in self.query:
                 raise ConfigError(f"web source {self.key}: a wikidata query must select ?item and ?image")
             return
+        if self.kind == "roster":
+            if not self.roster:
+                raise ConfigError(f"web source {self.key}: a roster source needs a roster (path or URL)")
+            return
         if self.kind != "listing":
-            raise ConfigError(f"web source {self.key}: kind must be listing or wikidata")
+            raise ConfigError(f"web source {self.key}: kind must be listing, wikidata or roster")
         self.pages = [p if isinstance(p, WebPage) else WebPage(**p) for p in self.pages]
         try:
             self.regex = re.compile(self.card_pattern, re.S)

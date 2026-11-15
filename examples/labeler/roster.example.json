@@ -1,0 +1,17 @@
+{
+  "generated": "2026-01-31",
+  "people": [
+    {
+      "id": "3f2a9c1b7e40",
+      "name": "Jane Doe",
+      "alt_names": {"fr": "Jeanne Doe"},
+      "image_url": "https://www.example.gov/images/people/jane-doe.jpg",
+      "details": {
+        "position": "Minister of Examples",
+        "organisation": "Ministry of Examples",
+        "page_url": "https://www.example.gov/ministry/leadership",
+        "fetched": "2026-01-31"
+      }
+    }
+  ]
+}
