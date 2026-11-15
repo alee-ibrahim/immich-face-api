@@ -5,6 +5,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed (labeler: faster named-neighbour vote)
+- The vote finds each unnamed face's nearest named face in batched matrix products (4,096 faces x 16,384 named faces
+  per product) instead of one small product per cluster, which read the whole named-face matrix once per cluster and
+  was memory-bound. Same exact search, same proposals; only the stored distance can differ in the 4th decimal when
+  floating-point summation order differs. Measured at production size (~71k clusters, 256k named / 822k unnamed
+  sampled faces): see the PR. Uses `OPENBLAS_NUM_THREADS` cores.
+- `run` stats include `phase_seconds` (folders, web, clusters, references, vote_samples, vote, merge_candidates,
+  thumbnails, apply) and each step is logged with its duration.
+
 ### Added (labeler: look-alike guard for the named-neighbour vote)
 - A vote is held when its faces are not clearly closer to the voted name than to another named person (median
   per-face gap < `vote_min_name_gap`, default 0.05), or < `vote_lookalike_min_gap` (0.10) when the voted name has a

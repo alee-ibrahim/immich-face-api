@@ -434,13 +434,46 @@ def merge_candidates(
     return sorted(out.values(), key=lambda m: (m.distance, m.a, m.b))
 
 
+def nearest_named(
+    unnamed: list[np.ndarray], nmat: np.ndarray, rows: int = 4096, cols: int = 16384
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """For every row of every array in ``unnamed``: the cosine distance to its nearest row of ``nmat`` and that row's
+    index. Exact (brute force), but batched: the faces of many clusters go into one matrix product of ``rows`` x
+    ``cols``, so the named matrix is read once per batch instead of once per cluster (one small product per cluster
+    was memory-bound and made the vote O(clusters x named faces) in passes over a matrix of hundreds of MB)."""
+    nmat = np.ascontiguousarray(nmat, dtype=np.float32)
+    dists: list[np.ndarray] = []
+    owners: list[np.ndarray] = []
+    i = 0
+    while i < len(unnamed):
+        j, n = i, 0
+        while j < len(unnamed) and (n == 0 or n + len(unnamed[j]) <= rows):
+            n += len(unnamed[j])
+            j += 1
+        q = np.concatenate(unnamed[i:j]).astype(np.float32, copy=False)
+        best_s = np.full(len(q), -np.inf, np.float32)
+        best_k = np.zeros(len(q), np.int64)
+        for c0 in range(0, len(nmat), cols):
+            sim = q @ nmat[c0 : c0 + cols].T
+            k = sim.argmax(1)
+            s = sim[np.arange(len(q)), k]
+            better = s > best_s  # strict: on a tie the earlier named face wins, as one argmax over all would
+            best_s[better] = s[better]
+            best_k[better] = k[better] + c0
+        bounds = np.cumsum([0] + [len(u) for u in unnamed[i:j]])
+        for a, b in zip(bounds[:-1], bounds[1:], strict=True):
+            dists.append(1.0 - best_s[a:b])
+            owners.append(best_k[a:b])
+        i = j
+    return dists, owners
+
+
 def named_vote(
     unnamed: dict[str, np.ndarray],
     named: dict[str, np.ndarray],
     names: dict[str, str],
     faces: dict[str, int],
     t: Thresholds,
-    block: int = 2048,
 ) -> list[Proposal]:
     """Unnamed clusters that are other clusters of an already-named person, by a face-level vote (how Immich itself
     assigns a face: to the person of its nearest face). For each sampled face of an unnamed cluster, its nearest face
@@ -457,28 +490,29 @@ def named_vote(
     lookalike = lookalike_names(named, names, t.vote_lookalike_distance) if t.vote_lookalike_distance > 0 else {}
     other_cache: dict[str, np.ndarray] = {}
     tokens_of = {n: name_tokens(n) for n in set(names[p] for p in npids)}
+    name_of = [names[p] for p in npids]
+    by_name: dict[str, list[str]] = {}
+    for p in npids:
+        by_name.setdefault(names[p], []).append(p)
+    upids = [p for p in unnamed if len(unnamed[p])]
+    all_d, all_k = nearest_named([unnamed[p] for p in upids], nmat)
     idents: dict[str, Identity] = {}
     out = []
-    for pid, emb in unnamed.items():
-        best_d = np.empty(len(emb), np.float32)
-        best_o = np.empty(len(emb), np.int64)
-        for s0 in range(0, len(emb), block):
-            sim = emb[s0 : s0 + block] @ nmat.T
-            k = sim.argmax(1)
-            best_d[s0 : s0 + block] = 1.0 - sim[np.arange(len(k)), k]
-            best_o[s0 : s0 + block] = owner_of[k]
+    for pid, best_d, best_k in zip(upids, all_d, all_k, strict=True):
+        emb = unnamed[pid]
+        best_o = owner_of[best_k]
         close = best_d <= t.face_distance
         if not close.any():
             continue
         votes: dict[str, int] = {}
         for o in best_o[close]:
-            nm = names[npids[o]]
+            nm = name_of[o]
             votes[nm] = votes.get(nm, 0) + 1
         top = max(votes, key=lambda n: (votes[n], n))
         share = votes[top] / len(emb)
         if share < t.vote_low_share:
             continue
-        sel = close & np.array([names[npids[o]] == top for o in best_o])
+        sel = close & np.array([name_of[o] == top for o in best_o])
         med = float(np.median(best_d[sel]))
         support = sorted({npids[o] for o in best_o[sel]})
         if top not in idents:
@@ -487,7 +521,7 @@ def named_vote(
                 kind="named",
                 source="named",
                 name=top,
-                centroid=normalise(np.concatenate([named[q] for q in npids if names[q] == top]).mean(0)),
+                centroid=normalise(np.concatenate([named[q] for q in by_name[top]]).mean(0)),
                 n_photos=0,
                 label="people already named in Immich",
             )
