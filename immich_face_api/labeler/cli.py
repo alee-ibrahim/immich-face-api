@@ -4,6 +4,7 @@
   apply        write the names of a stored run's proposals (chosen bands, minus --exclude / only --only)
   share-names  copy the owner's names into the still-empty copies of users the owner shares people with
   undo         revert names written by the labeler (a run, or single people), only where nobody changed them since
+  recheck-votes  read-only: re-check the people named from the vote with the anchored rule (report + CSV)
   export   write a stored run's report.html and proposals.csv to a directory
   status   recent runs
 
@@ -26,9 +27,21 @@ import numpy as np
 
 from .folders import folder_references, overlap
 from .immich import ImmichAPI, ImmichDB, ImmichError
-from .match import build_identities, held, merge_candidates, named_vote, propose
+from .match import (
+    anchor_distance,
+    anchored_voters,
+    build_identities,
+    date_eras,
+    folder_contradiction,
+    held,
+    merge_candidates,
+    named_vote,
+    propose,
+    spread,
+    vote_review_holds,
+)
 from .names import compatible, tidy_name
-from .report import proposals_csv, proposals_html, worklist_csv, worklist_html
+from .report import proposals_csv, proposals_html, recheck_csv, recheck_html, worklist_csv, worklist_html
 from .settings import ConfigError, LabelerSettings
 from .share_names import NameWriter, share_names, undo_copies
 from .store import Store, new_run_id
@@ -113,10 +126,38 @@ def _write_names(ctx: Context, run_id: str, source_run: str | None, owner: str, 
     return c
 
 
-def add_named_votes(ctx, owner, clusters, props, t, write_sources, timings=None):
+def folder_names_by_person(refs, ov: dict[tuple[str, str], int]) -> dict[str, dict[str, int]]:
+    """person id -> {folder name: faces of that person in the folder's dominant identity} (folder references)."""
+    name_of = {r.key: r.name for r in refs if r.kind == "folder"}
+    out: dict[str, dict[str, int]] = {}
+    for (pid, key), n in ov.items():
+        if key in name_of:
+            d = out.setdefault(pid, {})
+            d[name_of[key]] = d.get(name_of[key], 0) + n
+    return out
+
+
+def vote_origins(ctx, clusters) -> tuple[set[str], set[str]]:
+    """(vote-named people, people cleared for review), from the audit: a person counts as vote-named while its
+    current name is still the one the labeler wrote from the vote (a person who renamed it made it an anchor)."""
+    if not hasattr(ctx.store, "latest_owner_writes"):
+        return set(), set()
+    w = ctx.store.latest_owner_writes()
+    cur = {c.person_id: c.name for c in clusters}
+    vote = {p for p, st in w.items() if st["vote"] and cur.get(p) and cur.get(p) == st["name"]}
+    cleared = {p for p, st in w.items() if st["cleared"] and not cur.get(p)}
+    return vote, cleared
+
+
+def add_named_votes(ctx, owner, clusters, props, t, write_sources, timings=None, folder_names=None):
     """Named-neighbour vote for the unnamed clusters; merged with the reference proposals: same name = more
-    evidence, different name = both held, no reference proposal = a new proposal (source "named")."""
-    named = [c for c in clusters if c.name and not c.hidden and not c.name.startswith("(")]
+    evidence, different name = both held, no reference proposal = a new proposal (source "named").
+    Anchored: only anchors vote (vote_origins / anchored_voters); vote proposals for mixed clusters, clusters whose
+    person-named folders say otherwise, and people cleared for review are held."""
+    vote_named, cleared = vote_origins(ctx, clusters)
+    named_all = [c for c in clusters if c.name and not c.hidden and not c.name.startswith("(")]
+    voters, vst = anchored_voters({c.person_id: (c.name, c.centroid) for c in named_all}, vote_named, t)
+    named = [c for c in named_all if c.person_id in voters]
     unnamed = [c for c in clusters if not c.name and not c.hidden and c.faces >= t.min_cluster_faces]
     names = {c.person_id: c.name for c in named}
     timings = {} if timings is None else timings
@@ -125,9 +166,31 @@ def add_named_votes(ctx, owner, clusters, props, t, write_sources, timings=None)
         usamp = ctx.db.samples(owner, [c.person_id for c in unnamed], t.vote_unnamed_sample) if unnamed else {}
     with phase(timings, "vote"):
         votes = named_vote(usamp, nsamp, names, {c.person_id: c.faces for c in clusters}, t)
+    with phase(timings, "vote_review"):
+        writable = [v.person_id for v in votes if v.band != "low"]
+        years = (
+            ctx.db.face_years(owner, writable, t.vote_unnamed_sample)
+            if writable and hasattr(ctx.db, "face_years")
+            else {}
+        )
+        st = Counter(votes=len(votes), **{f"vote_voters_{k}": n for k, n in vst.items()})
+        for v in votes:
+            if v.person_id in cleared:
+                v.hold.append("cleared for curator review: the labeler does not name this person again")
+                st["vote_held_cleared"] += 1
+            if v.band == "low":
+                continue
+            rh = vote_review_holds(
+                v.identity.name, usamp[v.person_id], t, years.get(v.person_id), (folder_names or {}).get(v.person_id)
+            )
+            for h in rh:
+                st["vote_held_" + ("folder" if h.startswith("folder") else "eras" if "eras" in h else "spread")] += 1
+            v.hold.extend(rh)
     by = {p.person_id: p for p in props}
-    st = Counter(votes=len(votes))
     allowed = None if write_sources is None else set(write_sources)
+    for p in props:
+        if p.person_id in cleared:
+            p.hold.append("cleared for curator review: the labeler does not name this person again")
     for v in votes:
         p = by.get(v.person_id)
         if p is None:
@@ -270,7 +333,9 @@ def cmd_run(s: LabelerSettings, args) -> int:
                 props, refs, s.sources.write_sources, clusters, t, samples, ov, s.sources.names.homonym_detail
             )
         if s.sources.named_people:
-            props, vstats = add_named_votes(ctx, owner, clusters, props, t, s.sources.write_sources, timings)
+            props, vstats = add_named_votes(
+                ctx, owner, clusters, props, t, s.sources.write_sources, timings, folder_names_by_person(fres.refs, ov)
+            )
             stats.update(vstats)
             held_new += vstats["vote_held_unapproved"]
         stats["proposals_needing_source_approval"] = held_new
@@ -543,6 +608,136 @@ def _undo_copies(s: LabelerSettings, args) -> int:
         store.close()
 
 
+def load_folders(ctx, s: LabelerSettings, owner: str):
+    """Folder references and their overlap with people (as ``run`` builds them)."""
+    roots = sorted({r.root for r in s.sources.folders})
+    fres = folder_references(s.sources, {root: ctx.db.folder_faces(owner, root) for root in roots})
+    return fres, overlap(fres.refs, fres.face_person)
+
+
+def recheck(clusters, vote_named: set[str], usamp, nsamp, t, years=None, folder_names=None) -> list[dict]:
+    """Re-check people NAMED by the vote with the anchored rule (read-only): would the anchors alone still vote the
+    same name (medium or high, not held), how far is the cluster from the nearest anchor with that name, is it a
+    mixed cluster, and do person-named folders say otherwise. One row per vote-named person; ``suspect`` lists why."""
+    years = years or {}
+    folder_names = folder_names or {}
+    named_all = {c.person_id: c for c in clusters if c.name and not c.hidden and not c.name.startswith("(")}
+    anchors: dict[str, list] = {}
+    for p, c in named_all.items():
+        if p not in vote_named:
+            anchors.setdefault(c.name, []).append(c.centroid)
+    amat = {n: np.stack(v) for n, v in anchors.items()}
+    targets = sorted(p for p in vote_named if p in named_all and p in usamp)
+    # strict: only ANCHORS vote here (no vote-named person, not even one near an anchor), each target as if unnamed
+    names = {p: named_all[p].name for p in named_all if p not in vote_named and p in nsamp}
+    votes = {
+        v.person_id: v
+        for v in named_vote(
+            {p: usamp[p] for p in targets},
+            {q: nsamp[q] for q in names},
+            names,
+            {p: named_all[p].faces for p in targets},
+            t,
+        )
+    }
+    rows = []
+    for p in targets:
+        c = named_all[p]
+        v = votes.get(p)
+        why = []
+        if c.name not in amat:
+            why.append("no anchor has this name")
+        if v is None:
+            why.append("the anchors do not vote")
+        elif v.identity.name != c.name:
+            why.append(f"the anchors vote {v.identity.name!r}")
+        elif v.band == "low":
+            why.append(f"anchored vote too weak (share {v.margin:.2f})")
+        elif v.hold:
+            why.extend(v.hold)
+        rh = vote_review_holds(c.name, usamp[p], t, years.get(p), folder_names.get(p))
+        why.extend(h for h in rh if h not in why)
+        y = sorted(years.get(p) or [])
+        eras = date_eras(y, t.vote_era_gap_years, t.vote_era_min_share) if y else None
+        fc = folder_contradiction(c.name, folder_names.get(p), t.vote_folder_min_faces)
+        rows.append(
+            {
+                "person_id": p,
+                "name": c.name,
+                "faces": c.faces,
+                "suspect": why,
+                "anchor_distance": anchor_distance(c.name, c.centroid, amat),
+                "anchored_vote": f"{v.identity.name} {v.band} {v.margin:.2f}" if v else "",
+                "spread": round(spread(usamp[p]), 3),
+                "years": f"{y[0]}-{y[-1]}" if y else "",
+                "eras": " / ".join(eras) if eras else "",
+                "folder": f"{fc[0]} ({fc[1]})" if fc else "",
+            }
+        )
+    rows.sort(key=lambda r: (not r["suspect"], -r["faces"], r["person_id"]))
+    return rows
+
+
+def cmd_recheck_votes(s: LabelerSettings, args) -> int:
+    """Read-only sweep over every person the labeler named from the vote (report + CSV; writes nothing to Immich)."""
+    ctx = Context(s)
+    run_id = new_run_id()
+    ctx.store.start_run(run_id, "recheck-votes")
+    timings: dict[str, float] = {}
+    try:
+        owner = ctx.owner()
+        ctx.db.check(need_paths=bool(s.sources.folders))
+        t = s.sources.thresholds
+        with phase(timings, "folders"):
+            fres, ov = load_folders(ctx, s, owner) if s.sources.folders else (None, {})
+        with phase(timings, "clusters"):
+            clusters = ctx.db.clusters(owner)
+        vote_named, _ = vote_origins(ctx, clusters)
+        named_all = [c for c in clusters if c.name and not c.hidden and not c.name.startswith("(")]
+        voters, vst = anchored_voters({c.person_id: (c.name, c.centroid) for c in named_all}, vote_named, t)
+        targets = [c.person_id for c in named_all if c.person_id in vote_named]
+        with phase(timings, "samples"):
+            nsamp = ctx.db.samples(owner, sorted(p for p in voters if p not in vote_named), t.vote_named_sample)
+            usamp = ctx.db.samples(owner, targets, t.vote_unnamed_sample)
+            years = ctx.db.face_years(owner, targets, t.vote_unnamed_sample)
+        with phase(timings, "recheck"):
+            rows = recheck(
+                clusters, vote_named, usamp, nsamp, t, years, folder_names_by_person(fres.refs, ov) if fres else {}
+            )
+        sus = [r for r in rows if r["suspect"]]
+        reasons: Counter = Counter()
+        for r in sus:
+            for w in r["suspect"]:
+                reasons[w.split(":")[0].split("(")[0].split("'")[0].strip()] += 1
+        stats = {
+            "vote_named_people": len(rows),
+            "vote_named_faces": sum(r["faces"] for r in rows),
+            "suspects": len(sus),
+            "suspect_faces": sum(r["faces"] for r in sus),
+            "suspect_reasons": dict(reasons.most_common()),
+            "dates_available": bool(years),
+            **{f"voters_{k}": n for k, n in vst.items()},
+            "phase_seconds": timings,
+        }
+        with phase(timings, "thumbnails"):
+            thumbs = {r["person_id"]: ctx.api.thumbnail(r["person_id"]) for r in sus[: args.top]}
+        html = recheck_html(run_id, stats, sus[: args.top], thumbs, s.sources.immich_web_url)
+        csv = recheck_csv(rows, s.sources.immich_web_url)
+        ctx.store.finish_run(run_id, "ok", stats, html, csv)
+        if s.output_dir:
+            out = Path(s.output_dir) / run_id
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "recheck.html").write_text(html, encoding="utf-8")
+            (out / "recheck.csv").write_text(csv, encoding="utf-8")
+        log.info("recheck-votes %s: %s", run_id, json.dumps(stats, ensure_ascii=False))
+        return 0
+    except Exception as exc:
+        ctx.store.finish_run(run_id, "failed", {"error": f"{type(exc).__name__}: {exc}"})
+        raise
+    finally:
+        ctx.close()
+
+
 def cmd_export(s: LabelerSettings, args) -> int:
     store = Store(s)
     try:
@@ -600,6 +795,10 @@ def build_parser() -> argparse.ArgumentParser:
     e = sub.add_parser("export", help="write a stored report to a directory")
     e.add_argument("--run", default="latest")
     e.add_argument("--out", required=True)
+    rv = sub.add_parser(
+        "recheck-votes", help="read-only: re-check every person named from the vote with the anchored rule (report)"
+    )
+    rv.add_argument("--top", type=int, default=2000, help="suspects shown with a picture in the report")
     st = sub.add_parser("status", help="recent runs")
     st.add_argument("--limit", type=int, default=10)
     return ap
@@ -620,6 +819,7 @@ def main(argv: list[str] | None = None) -> int:
             "undo": cmd_undo,
             "tidy-names": cmd_tidy_names,
             "export": cmd_export,
+            "recheck-votes": cmd_recheck_votes,
             "status": cmd_status,
         }
         return commands[args.command](s, args)

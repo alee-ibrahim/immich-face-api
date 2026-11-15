@@ -626,3 +626,103 @@ def _name_gap(emb, best_d, nmat, owner_of, npids, names, other) -> tuple[float, 
         counts[names[npids[o]]] = counts.get(names[npids[o]], 0) + 1
     runner = max(counts, key=lambda n: (counts[n], n))
     return float(np.median(d_other - best_d)), runner
+
+
+# --- anchored vote: which named people may vote, and review holds for vote proposals
+
+
+def anchored_voters(
+    named: dict[str, tuple[str, np.ndarray]], vote_named: set[str], t: Thresholds
+) -> tuple[set[str], dict[str, int]]:
+    """Named people allowed to vote. ``named``: person id -> (name, centroid); ``vote_named``: the named people whose
+    current name came from the named-neighbour vote itself. Everybody else (named by a person, or by the labeler from
+    a folder, portrait, roster or curated override) is an ANCHOR. A vote-named person votes only when its centroid is
+    within ``vote_anchor_distance`` of an anchor with the same name (one step from an anchor, never a chain of votes);
+    0 = never. Returns (voters, counts)."""
+    anchors: dict[str, list[np.ndarray]] = {}
+    for pid, (nm, cen) in named.items():
+        if pid not in vote_named:
+            anchors.setdefault(nm, []).append(cen)
+    amat = {nm: np.stack(v) for nm, v in anchors.items()}
+    keep, c = set(), {"anchors": 0, "vote_named_near_anchor": 0, "vote_named_dropped": 0}
+    for pid, (nm, cen) in named.items():
+        if pid not in vote_named:
+            keep.add(pid)
+            c["anchors"] += 1
+        elif (
+            t.vote_anchor_distance > 0 and nm in amat and float((1.0 - amat[nm] @ cen).min()) <= t.vote_anchor_distance
+        ):
+            keep.add(pid)
+            c["vote_named_near_anchor"] += 1
+        else:
+            c["vote_named_dropped"] += 1
+    return keep, c
+
+
+def anchor_distance(name: str, centroid: np.ndarray, anchors: dict[str, np.ndarray]) -> float | None:
+    """Cosine distance from ``centroid`` to the nearest anchor centroid with this name (None: no anchor)."""
+    m = anchors.get(name)
+    return None if m is None or not len(m) else round(float((1.0 - m @ centroid).min()), 4)
+
+
+def spread(emb: np.ndarray) -> float:
+    """Median distance of a cluster's sampled faces to their own centroid: high for a cluster that mixes people."""
+    if len(emb) < 2:
+        return 0.0
+    return float(np.median(1.0 - emb @ normalise(emb.mean(0))))
+
+
+def date_eras(years: list[int] | np.ndarray, gap_years: int, min_share: float) -> tuple[str, str] | None:
+    """Two eras: the photos' years split by a gap of at least ``gap_years`` with at least ``min_share`` of the photos
+    on each side -> ("2001-2003", "2019-2020"). None otherwise (or with too few dated photos)."""
+    ys = np.sort(np.asarray([y for y in years if y], dtype=int))
+    if gap_years <= 0 or len(ys) < 4:
+        return None
+    best = None
+    for i in np.where(np.diff(ys) >= gap_years)[0]:
+        lo, hi = i + 1, len(ys) - i - 1
+        if min(lo, hi) / len(ys) >= min_share and (best is None or min(lo, hi) > best[0]):
+            best = (min(lo, hi), i)
+    if best is None:
+        return None
+    i = best[1]
+    return f"{ys[0]}-{ys[i]}", f"{ys[i + 1]}-{ys[-1]}"
+
+
+def folder_contradiction(name: str, folder_names: dict[str, int] | None, min_faces: int) -> tuple[str, int] | None:
+    """Person-named folders whose dominant person includes this cluster's faces, by name -> faces. A contradiction:
+    names that do not fit ``name`` hold at least ``min_faces`` faces and at least as many as the fitting names.
+    Returns (most frequent other name, its faces) or None."""
+    if not folder_names or min_faces <= 0:
+        return None
+    other = {n: k for n, k in folder_names.items() if not compatible(n, name)}
+    agree = sum(k for n, k in folder_names.items() if compatible(n, name))
+    total = sum(other.values())
+    if total < min_faces or total < agree:
+        return None
+    top = max(other, key=lambda n: (other[n], n))
+    return top, other[top]
+
+
+def vote_review_holds(
+    name: str,
+    emb: np.ndarray,
+    t: Thresholds,
+    years: list[int] | None = None,
+    folder_names: dict[str, int] | None = None,
+) -> list[str]:
+    """Reasons to hold a vote proposal for review: a mixed cluster (high spread, or two date eras far apart) or
+    person-named folders that say it is somebody else."""
+    out = []
+    if t.vote_max_spread > 0 and len(emb) >= t.vote_spread_min_faces:
+        s = spread(emb)
+        if s >= t.vote_max_spread:
+            out.append(f"mixed cluster: its faces are spread ({s:.3f} median to their centroid >= {t.vote_max_spread})")
+    if years:
+        eras = date_eras(years, t.vote_era_gap_years, t.vote_era_min_share)
+        if eras:
+            out.append(f"mixed cluster: photos from two eras ({eras[0]} and {eras[1]})")
+    fc = folder_contradiction(name, folder_names, t.vote_folder_min_faces)
+    if fc:
+        out.append(f"folder evidence: {fc[1]} of its faces are the person of the folder(s) named {fc[0]!r}")
+    return out

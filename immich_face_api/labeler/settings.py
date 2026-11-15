@@ -74,6 +74,19 @@ class Thresholds:
     vote_min_name_gap: float = 0.05
     vote_lookalike_distance: float = 0.40
     vote_lookalike_min_gap: float = 0.10
+    # anchored vote: only ANCHORS vote (people named by a person, or by the labeler from a folder, portrait, roster or
+    # curated override), plus vote-named people within vote_anchor_distance (centroids) of an anchor with the same name
+    # (0 = vote-named people never vote). Stops chains of votes through a wrongly voted cluster.
+    vote_anchor_distance: float = 0.45
+    # review holds on vote proposals (0 disables each): a mixed cluster (median face-to-centroid distance of its
+    # sampled faces >= vote_max_spread, with at least vote_spread_min_faces sampled; or photos in two eras at least
+    # vote_era_gap_years apart with vote_era_min_share of the photos on each side; needs the asset date column), and
+    # person-named folders whose person includes >= vote_folder_min_faces of its faces under another name
+    vote_max_spread: float = 0.40
+    vote_spread_min_faces: int = 10
+    vote_era_gap_years: int = 8
+    vote_era_min_share: float = 0.2
+    vote_folder_min_faces: int = 2
 
 
 @dataclass

@@ -11,6 +11,7 @@ GRANT CONNECT ON DATABASE immich TO immich_labeler;
 GRANT USAGE ON SCHEMA public TO immich_labeler;
 GRANT SELECT ON TABLE person, asset_face, face_search, version_history TO immich_labeler;
 GRANT SELECT (id, "ownerId", "deletedAt", "originalPath") ON TABLE asset TO immich_labeler;  -- folder rules only
+GRANT SELECT ("fileCreatedAt") ON TABLE asset TO immich_labeler;  -- optional: date-era hold on vote proposals
 
 -- 2. Its own state database (runs, proposals, audit log, caches): owned by the labeler, separate from Immich
 CREATE DATABASE immich_labeler OWNER immich_labeler;

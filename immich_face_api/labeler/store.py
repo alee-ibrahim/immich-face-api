@@ -89,6 +89,27 @@ CREATE TABLE IF NOT EXISTS labeler_embedding_cache (
 """
 
 
+VOTE_EVIDENCE = "named-neighbour vote"  # first evidence line of a name written from the vote (match.Proposal)
+CLEARED_NOTE = "cleared-for-review"  # audit note of a wrong name cleared for curators: never named again automatically
+
+
+def write_origins(rows) -> dict[str, dict]:
+    """``latest_owner_writes`` from applied owner audit rows (person_id, new_name, evidence, note, run_id) in order."""
+    out: dict[str, dict] = {}
+    for pid, name, ev, note, run in rows:
+        st = out.setdefault(pid, {"vote": False, "cleared": False})
+        if ev and str(ev[0]).startswith(VOTE_EVIDENCE):
+            st["vote"], st["cleared"] = True, False
+        elif note == "tidy-names":
+            pass  # a title removed: the name keeps its origin
+        elif (note or "").startswith(CLEARED_NOTE):
+            st["vote"], st["cleared"] = False, True
+        else:  # written from a source, or an owner-approved correction
+            st["vote"], st["cleared"] = False, False
+        st["name"], st["run_id"] = name, run
+    return out
+
+
 def new_run_id() -> str:
     import secrets
 
@@ -280,6 +301,16 @@ class Store:
         cur = self.conn.execute(q + " ORDER BY id DESC", args)
         cols = [d.name for d in cur.description]
         return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+    def latest_owner_writes(self) -> dict[str, dict]:
+        """Per person, from the labeler's applied writes on the owner's row (in order): the name it wrote last, whether
+        that name goes back to the named-neighbour vote ("vote"; a later title tidy keeps it, a later write from a
+        source or an owner-approved correction ends it), and whether it was cleared for curator review ("cleared")."""
+        cur = self.conn.execute(
+            """SELECT person_id::text, new_name, evidence, coalesce(note, ''), run_id FROM labeler_audit
+               WHERE target = 'owner' AND status = 'applied' ORDER BY person_id, id"""
+        )
+        return write_origins(cur.fetchall())
 
     def ever_applied(self, person_id: str) -> bool:
         return bool(
