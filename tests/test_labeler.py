@@ -68,25 +68,25 @@ def test_clean_name(raw, want):
 
 
 def test_compatible_and_homonym_keys():
-    assert compatible("Jabir", "Abdulla Jabir")
-    assert compatible("Ibrahim Suja", "Ibrahim Shujau")
-    assert compatible("Rasheedh Ali", "Rasheed Ali")
-    assert not compatible("Ali Rifau", "Abdulla Rifau")
+    assert compatible("Zafir", "Abdulla Zafir")
+    assert compatible("Jane Suja", "Jane Shujau")
+    assert compatible("Waheedh Example", "Waheed Example")
+    assert not compatible("Ali Zorvan", "Abdulla Zorvan")
     assert compatible("Adbul Sattar", "Abdul Sattar")  # one typo per word
-    assert not compatible("Abdul Salaam Ibrahim", "Abdulla Shazeem")  # short skeletons must match exactly
-    assert compatible("Mumthazim Ibrahim", "Munthazim Ibrahim")
-    assert not compatible("Liraaru Hameed", "Ahmed Didi")  # hmd vs ahmd: no tolerance for short skeletons
+    assert not compatible("Abdul Salaam Example", "Abdulla Shazeem")  # short skeletons must match exactly
+    assert compatible("Mumthazim Example", "Munthazim Example")
+    assert not compatible("Example Hameed", "Ahmed Example")  # hmd vs ahmd: no tolerance for short skeletons
     assert compatible("Jane AbdulRahmaan", "Jane Abdul Rahman")  # joined words
-    assert not compatible("Ali Riza", "Ali Rifau")
-    assert compatible("Abdul Salaam Ibrahim", "Abdulsalaam Ibrahim")
-    assert compatible("Abdul Ghani Abdul Hakeem", "Abdullganee Abdullhakeem")
-    assert not compatible("Saadha Ali", "Saudhullah Hilmy")  # a joined short name must not absorb a word
-    assert not compatible("Ali Rifau", "Abdulla Rifau")
+    assert not compatible("Ali Kopa", "Ali Zorvan")
+    assert compatible("Abdul Salaam Example", "Abdulsalaam Example")
+    assert compatible("Abdul Ghani Abdul Kareem", "Abdullganee Abdullkareem")
+    assert not compatible("Saadha Example", "Saudhullah Zorvan")  # a joined short name must not absorb a word
+    assert not compatible("Ali Zorvan", "Abdulla Zorvan")
     assert clean_name("jane doe", RULES) == "Jane Doe" and clean_name("Jane doe", RULES) == "Jane Doe"
     assert clean_name("Jane McDoe", RULES) == "Jane McDoe"
-    assert name_key("Mohamed Rasheed") == name_key("Mohamed Rashid")
-    assert name_key("Hassan Waheed") != name_key("Hussain Waheed")
-    assert name_key("Abdulla Ahmed") != name_key("Ahmed Abdulla")
+    assert name_key("Example Rasheed") == name_key("Example Rashid")
+    assert name_key("Hassan Example") != name_key("Hussain Example")
+    assert name_key("Jane Roe") != name_key("Roe Jane")
 
 
 # --- config
@@ -177,30 +177,32 @@ def ref(key, kind, name, p, n=5, **kw):
 def test_identities_join_by_face_and_prefer_web_spelling():
     a, b = person(), person()
     refs = [
-        ref("folder:1", "folder", "Jabir", a, 8),
-        ref("web:s:1", "web", "Abdulla Jabir", a, 1, alt_names={"dv": "x"}),
+        ref("folder:1", "folder", "Zafir", a, 8),
+        ref("web:s:1", "web", "Abdulla Zafir", a, 1, alt_names={"dv": "x"}),
         ref("folder:2", "folder", "Jane Roe", b),
     ]
     ids = build_identities(refs, T)
     assert len(ids) == 2
     joined = next(i for i in ids if len(i.refs) == 2)
-    assert joined.name == "Abdulla Jabir" and joined.alt_names == {"dv": "x"} and not joined.conflicts
+    assert joined.name == "Abdulla Zafir" and joined.alt_names == {"dv": "x"} and not joined.conflicts
 
 
 def test_identities_conflict_and_homonym():
     a, b = person(), person()
-    ids = build_identities([ref("folder:1", "folder", "Ali Rifau", a), ref("web:s:1", "web", "Abdulla Rifau", a, 1)], T)
-    assert len(ids) == 1 and ids[0].conflicts == ["Ali Rifau"]
+    ids = build_identities(
+        [ref("folder:1", "folder", "Ali Zorvan", a), ref("web:s:1", "web", "Abdulla Zorvan", a, 1)], T
+    )
+    assert len(ids) == 1 and ids[0].conflicts == ["Ali Zorvan"]
     ids = build_identities(
         [
-            ref("web:s:1", "web", "Mohamed Rasheed", a, 1, details={"area": "North"}),
-            ref("web:s:2", "web", "Mohamed Rasheedh", b, 1, details={"area": "South"}),
+            ref("web:s:1", "web", "Example Rasheed", a, 1, details={"area": "North"}),
+            ref("web:s:2", "web", "Example Rasheedh", b, 1, details={"area": "South"}),
         ],
         T,
         homonym_detail="area",
     )
     assert len(ids) == 2 and all(i.homonym for i in ids)
-    assert sorted(i.proposed_name for i in ids) == ["Mohamed Rasheed (North)", "Mohamed Rasheedh (South)"]
+    assert sorted(i.proposed_name for i in ids) == ["Example Rasheed (North)", "Example Rasheedh (South)"]
 
 
 def test_propose_bands_and_skips():
@@ -387,9 +389,9 @@ def test_namesake_about_as_close_is_held_and_conflicts_are_held():
     a, b = person(), person()
     both = normalise(a + b)  # a cluster halfway between two namesakes
     ids = build_identities(
-        [ref("web:s:1", "web", "Mohamed Rasheed", a, 1), ref("web:s:2", "web", "Mohamed Rasheed", b, 1)], T
+        [ref("web:s:1", "web", "Example Rasheed", a, 1), ref("web:s:2", "web", "Example Rasheed", b, 1)], T
     )
-    assert all(i.homonym for i in ids) and all(i.proposed_name == "Mohamed Rasheed" for i in ids)  # plain names
+    assert all(i.homonym for i in ids) and all(i.proposed_name == "Example Rasheed" for i in ids)  # plain names
     t = Thresholds(match_max_distance=0.9)
     (p,) = propose([Cluster("X", 5, both)], ids, t, {}, {})
     assert held(p.evidence()) and any("namesake" in h for h in p.hold)
@@ -398,7 +400,7 @@ def test_namesake_about_as_close_is_held_and_conflicts_are_held():
     (q,) = propose([Cluster("Y", 6, normalise(fa.mean(0)))], ids, T, {"Y": fa}, {})
     assert not q.hold and q.band == "medium"  # single portrait: reference has 1 photo < 2
     ids2 = build_identities(
-        [ref("folder:1", "folder", "Ali Rifau", a), ref("web:s:1", "web", "Abdulla Rifau", a, 1)], T
+        [ref("folder:1", "folder", "Ali Zorvan", a), ref("web:s:1", "web", "Abdulla Zorvan", a, 1)], T
     )
     (r,) = propose([Cluster("Z", 6, normalise(fa.mean(0)))], ids2, T, {"Z": fa}, {})
     assert held(r.evidence())
@@ -516,7 +518,7 @@ def test_named_vote_same_result_for_any_batch_size(monkeypatch):
 
     people = [person() for _ in range(6)]
     named = {f"N{i}": np.stack([face_of(p) for _ in range(4 + i)]) for i, p in enumerate(people[:4])}
-    names = {"N0": "Jane Doe", "N1": "John Roe", "N2": "Jane Doe", "N3": "Ali Hassan"}
+    names = {"N0": "Jane Doe", "N1": "John Roe", "N2": "Jane Doe", "N3": "Sam Example"}
     unnamed = {f"U{i}": np.stack([face_of(people[i % 6]) for _ in range(1 + i % 5)]) for i in range(12)}
     faces = {k: len(v) for k, v in unnamed.items()}
 
@@ -524,7 +526,7 @@ def test_named_vote_same_result_for_any_batch_size(monkeypatch):
         return [(v.person_id, v.identity.name, v.band, v.distance, v.margin, v.vote) for v in votes]
 
     want = key(match.named_vote(unnamed, named, names, faces, T))
-    assert want and {w[1] for w in want} >= {"Jane Doe", "John Roe", "Ali Hassan"}
+    assert want and {w[1] for w in want} >= {"Jane Doe", "John Roe", "Sam Example"}
     real = match.nearest_named
     monkeypatch.setattr(match, "nearest_named", lambda u, n: real(u, n, rows=3, cols=7))
     assert key(match.named_vote(unnamed, named, names, faces, T)) == want
@@ -635,9 +637,9 @@ def test_worklist_csv():
 def test_overrides_only_for_pure_name_conflicts_and_only_names_from_the_evidence():
     from immich_face_api.labeler.cli import override_proposals
 
-    conflict = "HOLD: the sources disagree on the name (Aishtah Sheema)"
+    conflict = "HOLD: the sources disagree on the name (Aishtah Example)"
     props = [
-        {"person_id": "A", "name": "Aminath Sheema", "evidence": ["name conflict: Aishtah Sheema", conflict]},
+        {"person_id": "A", "name": "Aminath Example", "evidence": ["name conflict: Aishtah Example", conflict]},
         {
             "person_id": "B",
             "name": "Jane Doe",
@@ -648,10 +650,10 @@ def test_overrides_only_for_pure_name_conflicts_and_only_names_from_the_evidence
     ]
     ov = {
         k: {"name": v, "source": "directory", "note": "unique match"}
-        for k, v in {"A": "Aishath Sheema", "B": "Jane Doe", "C": "Someone Else", "D": "Ann Lee"}.items()
+        for k, v in {"A": "Aishath Example", "B": "Jane Doe", "C": "Someone Else", "D": "Ann Lee"}.items()
     }
     out, c = override_proposals(props, ov)
-    assert [o["person_id"] for o in out] == ["A"] and out[0]["name"] == "Aishath Sheema"
+    assert [o["person_id"] for o in out] == ["A"] and out[0]["name"] == "Aishath Example"
     assert not any(e.startswith("HOLD") for e in out[0]["evidence"])
     assert out[0]["evidence"][-1] == "name decided by directory: unique match"
     assert c == Counter(usable=1, not_only_a_name_conflict=2, name_not_among_the_evidence=1)
@@ -882,7 +884,7 @@ def test_look_alike_guard_holds_in_the_batched_vote(monkeypatch):
         "NT": np.stack([face_of(twin) for _ in range(10)]),
         "NC": np.stack([face_of(c) for _ in range(10)]),
     }
-    names = {"NA": "Ahmed Didi", "NT": "Ahmed Hisham Wajeeh", "NC": "Mariyam Shifa"}
+    names = {"NA": "Jane Doe", "NT": "Jane Example Roe", "NC": "Sam Example"}
     unnamed = {f"A{i}": np.stack([face_of(a) for _ in range(6)]) for i in range(3)}
     unnamed |= {f"C{i}": np.stack([face_of(c) for _ in range(6)]) for i in range(3)}
     unnamed["X"] = np.stack([face_of(person()) for _ in range(4)])

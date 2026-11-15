@@ -30,7 +30,7 @@ def clean_name(raw: str, rules: NameRules) -> str | None:
         return None
     if any(re.search(p, s, flags=re.I) for p in rules.exclude_patterns):
         return None
-    # "MP AHMED AMIR", "hassan shareef", "Mariyam hudha" -> capitalised words; "AbdulRahmaan" is kept as written;
+    # "MP JANE EXAMPLE", "jane example", "Jane example" -> capitalised words; "AbdulRahmaan" is kept as written;
     # titles (rules.titles / keep_titles) removed or written one way
     out = tidy_name(
         " ".join(w[:1].upper() + w[1:].lower() if w.isupper() or w.islower() else w for w in s.split(" ")), rules
@@ -54,7 +54,7 @@ def _capitalise(words: list[str]) -> list[str]:
 def tidy_name(name: str, rules: NameRules) -> str:
     """Remove titles (``rules.titles``) from the start and the end of a name, write a kept title
     (``rules.keep_titles``) one way and put it first, collapse whitespace and capitalise all-upper/all-lower words.
-    Only whole words at the edges are removed ("Hon. Ali Shah, MP" -> "Ali Shah"; "Dhonmanik" stays). A name that
+    Only whole words at the edges are removed ("Hon. Jane Example, MP" -> "Jane Example"; "Honeyman" stays). A name that
     would be left without letters is returned unchanged apart from whitespace."""
     s = _SPACES.sub(" ", unicodedata.normalize("NFC", name or "")).strip()
     if not s or not (rules.titles or rules.keep_titles):
@@ -104,7 +104,7 @@ def has_title(name: str, rules: NameRules) -> bool:
 
 def _skeleton(token: str) -> str:
     """Spelling-tolerant key of one name token: transliterations of the same name differ mostly in vowels and in
-    "dh"/"d", "th"/"t" ("Rasheedh" / "Rasheed", "Musthofa" / "Musthafa")."""
+    "dh"/"d", "th"/"t" ("Waheedh" / "Waheed", "Musthofa" / "Musthafa")."""
     t = unicodedata.normalize("NFKD", token.casefold())
     t = "".join(c for c in t if c.isalpha())
     if not t:
@@ -178,7 +178,7 @@ def _close(a: str, b: str) -> bool:
 
 def _variants(name: str) -> list[set[str]]:
     """The name's tokens, and the same with any adjacent words written as one ("Abdul Salaam" ~ "Abdulsalaam",
-    "Abdul Ghani Abdul Hakeem" ~ "Abdulghani Abdulhakeem"). Names have few words, so all combinations are cheap."""
+    "Abdul Ghani Abdul Kareem" ~ "Abdulghani Abdulkareem"). Names have few words, so all combinations are cheap."""
     words = _words(name)
     if not words or len(words) > 8:
         return [name_tokens(name)]
@@ -201,8 +201,8 @@ def _fits(short: set[str], long_: set[str]) -> bool:
 def compatible(a: str, b: str) -> bool:
     """Could ``a`` and ``b`` be spellings of the same person's name? Every token of the shorter one must appear in
     the longer one (spelling-tolerant, one typo per token allowed; two adjacent words may be written as one):
-    "Jabir" / "Abdulla Jabir" yes, "Adbul Sattar" / "Abdul Sattar" yes, "Abdul Salaam" / "Abdulsalaam" yes,
-    "Ali Rifau" / "Abdulla Rifau" no."""
+    "Zafir" / "Abdulla Zafir" yes, "Adbul Sattar" / "Abdul Sattar" yes, "Abdul Salaam" / "Abdulsalaam" yes,
+    "Ali Zorvan" / "Abdulla Zorvan" no."""
     va, vb = _variants(a), _variants(b)
     for i, ta in enumerate(va):
         for j, tb in enumerate(vb):
