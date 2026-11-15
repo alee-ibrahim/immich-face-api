@@ -514,7 +514,8 @@ def named_vote(
             why_not_high=why,
         )
         prop.vote = (votes[top], len(emb), len(support))
-        if t.vote_min_name_gap > 0 or top in lookalike:
+        # only where a name could be written (low is report-only): one extra matrix product per such proposal
+        if band != "low" and (t.vote_min_name_gap > 0 or top in lookalike):
             if top not in other_cache:
                 other_cache[top] = _other_mask(top, npids, names, tokens_of)[owner_of]
             gap, runner = _name_gap(emb[sel], best_d[sel], nmat, owner_of, npids, names, other_cache[top])
@@ -581,10 +582,11 @@ def _name_gap(emb, best_d, nmat, owner_of, npids, names, other) -> tuple[float, 
     when it belongs to another person."""
     if not other.any():
         return 1.0, None
-    sim = emb @ nmat[other].T
+    sim = emb @ nmat.T  # no nmat[other]: that would copy the whole named matrix for every proposal
+    sim[:, ~other] = -2.0
     k = sim.argmax(1)
     d_other = 1.0 - sim[np.arange(len(k)), k]
-    oo = owner_of[other][k]
+    oo = owner_of[k]
     counts: dict[str, int] = {}
     for o in oo:
         counts[names[npids[o]]] = counts.get(names[npids[o]], 0) + 1
