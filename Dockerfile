@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
 # Alpine: small, and none of the Debian packages (libxml2 and friends) this service does not need.
-FROM python:3.13-alpine@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e AS build
+FROM python:3.15-alpine@sha256:0f9552bb28711333da16915ec146f5e6bb44a7fdac9ced15dc17c2e0206346dd AS build
 WORKDIR /app
 COPY requirements.txt .
 RUN python -m venv /venv \
  && /venv/bin/pip install --no-cache-dir --only-binary=:all: -r requirements.txt \
  && /venv/bin/pip uninstall -y pip setuptools 2>/dev/null || true
 
-FROM python:3.13-alpine@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e
+FROM python:3.15-alpine@sha256:0f9552bb28711333da16915ec146f5e6bb44a7fdac9ced15dc17c2e0206346dd
 LABEL org.opencontainers.image.title="immich-face-api" \
       org.opencontainers.image.description="Who is in this photo? Face identification against the named people of an Immich library" \
       org.opencontainers.image.licenses="MIT"
